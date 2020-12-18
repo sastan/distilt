@@ -30,7 +30,6 @@
   "dependencies": {
     "esbuild": "^0.8.23",
     "execa": "^5.0.0",
-    "find-up": "^5.0.0",
     "globby": "^11.0.1",
     "pkg-dir": "^5.0.0",
     "project-root-directory": "^1.0.3",

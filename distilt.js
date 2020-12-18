@@ -127,7 +127,6 @@ async function main() {
           if (entryPoint === '.') {
             const exports = {}
 
-            // TODO generate types
             entryPoints.forEach(([subEntryPoint]) => {
               const bundleName = path.relative(
                 '.',
@@ -216,7 +215,6 @@ async function main() {
           globalName: 'exports',
           minify: true,
           external: false,
-          // TODO dedent and minify
           banner:
             `!function(e,t){` +
             `"function"==typeof define&&define.amd` +
@@ -422,7 +420,6 @@ async function main() {
       ),
     )
 
-    // TODO run tsc only once; and rollup for every export
     try {
       // tsc --project tsconfig.dist.json
       await require('execa')('tsc', ['--project', tsconfig], {

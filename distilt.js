@@ -51,6 +51,10 @@ async function main() {
     ...manifest.optinonalDependencies,
   }).filter((dependency) => !bundledDependencies.includes(dependency))
 
+  external.forEach((id) => {
+    external.push(`${id}/*`)
+  })
+
   console.log(`Bundling ${manifest.name}@${manifest.version}`)
 
   await prepare()
@@ -211,28 +215,23 @@ async function main() {
           outfile: `./${bundleName}.umd.js`,
           platform: 'browser',
           target: 'es2015',
-          format: 'iife',
-          globalName: 'exports',
+          format: 'esm',
           minify: true,
-          external: false,
           define: {
             'process.env.NODE_ENV': '"production"',
             'process.platform': '"browser"',
             'process.browser': 'true',
           },
-          banner:
-            `!function(e,t){` +
-            `"function"==typeof define&&define.amd` +
-            `?define(t)` +
-            `:"object"==typeof module&&module.exports` +
-            `?module.exports=t(require)` +
-            // IIFE - provide a simple require function for looking up values in root scope
-            `:e.${globalName}=t((function(t){for(var i=${JSON.stringify(
-              globalName,
-            )}.split("."),n=t.split("/");".."==n[0];)n.shift(),i.pop();for(var f,o=i.concat(t),r=e;r&&(f=o.shift());r=r[f]);return r}))` +
-            `}("undefined"!=typeof self?self:this,(function(require){`,
-          // var exports = ...
-          footer: `return exports}));`,
+          rollup: {
+            external: () => true,
+            output: {
+              format: 'umd',
+              name: camelize(globalName),
+              globals: (id) => {
+                return { jquery: '$', lodash: '_' }[id] || camelize(id, globalName)
+              },
+            },
+          },
         },
       })
     }
@@ -328,13 +327,13 @@ async function main() {
         generateTypesBundle(inputFile, path.resolve(path.dirname(manifestPath), exports.types)),
       ...Object.entries(outputs)
         .filter(([, output]) => output)
-        .map(async ([, output]) => {
+        .map(async ([, { rollup, ...output }]) => {
           const outfile = path.resolve(paths.dist, output.outfile)
 
           const logKey = `Bundled ${path.relative(process.cwd(), inputFile)} -> ${path.relative(
             process.cwd(),
             outfile,
-          )} (${output.format} - ${output.target})`
+          )} (${(rollup && rollup.output.format) || output.format} - ${output.target})`
 
           console.time(logKey)
 
@@ -358,6 +357,22 @@ async function main() {
             tsconfig: paths.tsconfig,
             plugins,
           })
+
+          if (rollup) {
+            const bundle = await require('rollup').rollup({
+              ...rollup,
+              input: outfile,
+            })
+
+            await bundle.write({
+              ...rollup.output,
+              file: outfile,
+              sourcemap: true,
+              preferConst: true,
+              exports: 'auto',
+              compact: true,
+            })
+          }
 
           console.timeEnd(logKey)
         }),
@@ -458,4 +473,20 @@ function relative(from, to) {
   const p = path.relative(path.dirname(from), to)
 
   return p[0] === '.' ? p : './' + p
+}
+
+function camelize(str, globalName) {
+  if (str.startsWith('.')) {
+    for (var i = globalName.split('.'), n = str.split('/'); '..' == n[0]; ) {
+      n.shift()
+      i.pop()
+    }
+
+    str = i.concat(n).join('.')
+  }
+
+  return str.replace(/\W/g, ' ').replace(/(?:^\w|[A-Z]|\b\w|\s+)/g, function (match, index) {
+    if (+match === 0) return '' // or if (/\s+/.test(match)) for white spaces
+    return index === 0 ? match.toLowerCase() : match.toUpperCase()
+  })
 }

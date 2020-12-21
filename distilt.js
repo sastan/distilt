@@ -215,6 +215,11 @@ async function main() {
           globalName: 'exports',
           minify: true,
           external: false,
+          define: {
+            'process.env.NODE_ENV': '"production"',
+            'process.platform': '"browser"',
+            'process.browser': 'true',
+          },
           banner:
             `!function(e,t){` +
             `"function"==typeof define&&define.amd` +
@@ -267,14 +272,17 @@ async function main() {
 
       // Define package loading
       // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
-      exports: manifest.exports  === false ? undefined : {
-        ...manifest.exports,
+      exports:
+        manifest.exports === false
+          ? undefined
+          : {
+              ...manifest.exports,
 
-        '.': exports,
+              '.': exports,
 
-        // Allow access to package.json
-        './package.json': './package.json',
-      },
+              // Allow access to package.json
+              './package.json': './package.json',
+            },
 
       // Used by node
       main: exports.node,
@@ -316,7 +324,8 @@ async function main() {
     await fs.writeFile(manifestPath, JSON.stringify(publishManifest, null, 2))
 
     await Promise.all([
-      exports.types && generateTypesBundle(inputFile, path.resolve(path.dirname(manifestPath), exports.types)),
+      exports.types &&
+        generateTypesBundle(inputFile, path.resolve(path.dirname(manifestPath), exports.types)),
       ...Object.entries(outputs)
         .filter(([, output]) => output)
         .map(async ([, output]) => {
@@ -396,17 +405,24 @@ async function main() {
 
     const typesDirectory = path.resolve(paths.dist, '.types')
 
-    const tsconfig = path.resolve(
-      path.dirname(paths.tsconfig),
-      'tsconfig.dist.json',
-    )
+    const tsconfig = path.resolve(path.dirname(paths.tsconfig), 'tsconfig.dist.json')
 
     await fs.writeFile(
       tsconfig,
       JSON.stringify(
         {
           extends: './' + path.basename(paths.tsconfig),
-          exclude: ['**/__mocks__/**', '**/__fixtures__/**', '**/__tests__/**'],
+          exclude: [
+            '**/__mocks__/**',
+            '**/__fixtures__/**',
+            '**/__tests__/**',
+            '**/test/**',
+            '**/tests/**',
+            '**/*.test.ts',
+            '**/*.test.tsx',
+            '**/*.spec.ts',
+            '**/*.spec.tsx',
+          ],
           compilerOptions: {
             target: 'ESNext',
             module: manifest.browser === false ? 'CommonJS' : 'ESNext',

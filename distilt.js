@@ -174,10 +174,15 @@ async function main() {
                 name: 'external:parent',
                 setup(build) {
                   // Match all parent imports and mark them as external
-                  build.onResolve({ filter: /^\.\./ }, ({ path }) => ({
-                    path: path.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, ''),
-                    external: true,
-                  }))
+                  // match: '..', '../', '../..', '../index'
+                  // no match: '../helper' => this will be included in all bundles referencing it
+                  build.onResolve(
+                    { filter: /^\.\.(\/\.\.)*(\/|\/index(?:\.(?:[mc]js|[jt]sx?))?)?$/ },
+                    ({ path }) => ({
+                      path: path.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, ''),
+                      external: true,
+                    }),
+                  )
                 },
               },
             ],
@@ -197,6 +202,9 @@ async function main() {
           platform: 'node',
           target: targets.node,
           format: 'cjs',
+          define: {
+            'process.browser': 'false',
+          },
         },
       })
     }

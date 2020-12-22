@@ -44,12 +44,14 @@ async function main() {
     ...(manifest.bundleDependencies || []),
   ]
 
-  const external = Object.keys({
-    ...manifest.dependencies,
-    ...manifest.peerDependencies,
-    ...manifest.devDependencies,
-    ...manifest.optinonalDependencies,
-  }).filter((dependency) => !bundledDependencies.includes(dependency))
+  const external = [
+    ...Object.keys({
+      ...manifest.dependencies,
+      ...manifest.peerDependencies,
+      ...manifest.devDependencies,
+      ...manifest.optinonalDependencies,
+    }).filter((dependency) => !bundledDependencies.includes(dependency)),
+  ]
 
   external.forEach((id) => {
     external.push(`${id}/*`)
@@ -127,24 +129,27 @@ async function main() {
     await Promise.all(
       Object.entries(manifest.exports)
         .filter(([entryPoint, inputFile]) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
-        .map(([entryPoint, inputFile], index, entryPoints) => {
+        .map(async ([entryPoint, inputFile], index, entryPoints) => {
           if (entryPoint === '.') {
             const exports = {}
 
-            entryPoints.forEach(([subEntryPoint]) => {
-              const bundleName = path.relative(
-                '.',
-                path.join(subEntryPoint, path.basename(subEntryPoint)),
-              )
+            await Promise.all(
+              entryPoints.map(async ([subEntryPoint, subInputFile]) => {
+                const bundleName = path.relative(
+                  '.',
+                  path.join(subEntryPoint, path.basename(subEntryPoint)),
+                )
 
-              const outputs = getOutputs({
-                manifest,
-                bundleName,
-                globalName: globalName + subEntryPoint.slice(1).replace(/\//g, '.'),
-              })
+                const outputs = await getOutputs({
+                  inputFile: subInputFile,
+                  manifest,
+                  bundleName,
+                  globalName: globalName + subEntryPoint.slice(1).replace(/\//g, '.'),
+                })
 
-              exports[subEntryPoint] = getExports({ outputs, bundleName })
-            })
+                exports[subEntryPoint] = getExports({ outputs, bundleName })
+              }),
+            )
 
             return generateBundles({
               manifest: {
@@ -191,7 +196,7 @@ async function main() {
     )
   }
 
-  function getOutputs({ manifest, bundleName, globalName }) {
+  async function getOutputs({ inputFile, manifest, bundleName, globalName }) {
     const outputs = {}
 
     if (manifest.browser !== true) {
@@ -209,7 +214,13 @@ async function main() {
       })
     }
 
-    if (manifest.browser !== false) {
+    if (
+      manifest.browser !== false &&
+      // Do not create browser bundle node modules
+      !/^\/\* eslint-env node\b/.test(
+        await fs.readFile(path.resolve(paths.root, inputFile), 'utf-8'),
+      )
+    ) {
       Object.assign(outputs, {
         browser: {
           outfile: `./${bundleName}.js`,
@@ -268,12 +279,13 @@ async function main() {
     inputFile,
     plugins,
   }) {
-    const outputs = getOutputs({ manifest, bundleName, globalName })
+    const outputs = await getOutputs({ inputFile, manifest, bundleName, globalName })
 
     const manifestPath = path.resolve(paths.dist, manifestFile)
 
     const exports = getExports({ outputs, bundleName, manifestFile })
 
+    console.log({outputs, exports})
     const publishManifest = {
       ...manifest,
 
@@ -292,7 +304,7 @@ async function main() {
             },
 
       // Used by node
-      main: exports.node,
+      main: exports.node || (outputs.node && exports.default),
       // Used by bundlers like rollup and CDNs
       module: outputs.browser && exports.default,
       unpkg: exports.script,

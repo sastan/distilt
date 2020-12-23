@@ -285,7 +285,6 @@ async function main() {
 
     const exports = getExports({ outputs, bundleName, manifestFile })
 
-    console.log({outputs, exports})
     const publishManifest = {
       ...manifest,
 

@@ -44,18 +44,16 @@ async function main() {
     ...(manifest.bundleDependencies || []),
   ]
 
-  const external = [
-    ...Object.keys({
-      ...manifest.dependencies,
-      ...manifest.peerDependencies,
-      ...manifest.devDependencies,
-      ...manifest.optinonalDependencies,
-    }).filter((dependency) => !bundledDependencies.includes(dependency)),
-  ]
-
-  external.forEach((id) => {
-    external.push(`${id}/*`)
+  const external = Object.keys({
+    ...manifest.dependencies,
+    ...manifest.peerDependencies,
+    ...manifest.devDependencies,
+    ...manifest.optinonalDependencies,
   })
+
+  // external.forEach((id) => {
+  //   external.push(`${id}/*`)
+  // })
 
   console.log(`Bundling ${manifest.name}@${manifest.version}`)
 
@@ -333,10 +331,14 @@ async function main() {
       prettier: undefined,
       np: undefined,
       'size-limit': undefined,
-
-      // Resets comments
-      '//': undefined,
     }
+
+    // Resets comments
+    Object.keys(publishManifest).forEach(key => {
+      if (key.startsWith('//')) {
+        publishManifest[key] = undefined
+      }
+    })
 
     await fs.mkdir(path.dirname(manifestPath), { recursive: true })
     await fs.writeFile(manifestPath, JSON.stringify(publishManifest, null, 2))
@@ -363,7 +365,9 @@ async function main() {
             charset: 'utf8',
             resolveExtensions,
             bundle: true,
-            external: output.external === false ? undefined : external,
+            external: rollup
+              ? external.filter((dependency) => !bundledDependencies.includes(dependency))
+              : external,
             mainFields: [
               'esnext',
               output.platform === 'browser' && 'browser:module',

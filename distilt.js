@@ -258,11 +258,11 @@ async function main() {
 
   function getExports({ outputs, bundleName, manifestFile = 'package.json' }) {
     return {
-      // Only add if we have browser and node bundles
-      node: outputs.module && outputs.node && relative(manifestFile, outputs.node.outfile),
       module: outputs.module && relative(manifestFile, outputs.module.outfile),
       script: outputs.script && relative(manifestFile, outputs.script.outfile),
       types: paths.tsconfig ? relative(manifestFile, `./${bundleName}.d.ts`) : undefined,
+      // Only add if we have browser and node bundles
+      node: outputs.module && outputs.node && relative(manifestFile, outputs.node.outfile),
       default: relative(
         manifestFile,
         outputs.module ? outputs.module.outfile : outputs.node.outfile,

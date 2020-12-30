@@ -220,7 +220,7 @@ async function main() {
       )
     ) {
       Object.assign(outputs, {
-        browser: {
+        module: {
           outfile: `./${bundleName}.js`,
           platform: 'browser',
           target: targets.browser,
@@ -259,12 +259,13 @@ async function main() {
   function getExports({ outputs, bundleName, manifestFile = 'package.json' }) {
     return {
       // Only add if we have browser and node bundles
-      node: outputs.browser && outputs.node && relative(manifestFile, outputs.node.outfile),
+      node: outputs.module && outputs.node && relative(manifestFile, outputs.node.outfile),
+      module: outputs.module && relative(manifestFile, outputs.module.outfile),
       script: outputs.script && relative(manifestFile, outputs.script.outfile),
       types: paths.tsconfig ? relative(manifestFile, `./${bundleName}.d.ts`) : undefined,
       default: relative(
         manifestFile,
-        outputs.browser ? outputs.browser.outfile : outputs.node.outfile,
+        outputs.module ? outputs.module.outfile : outputs.node.outfile,
       ),
     }
   }
@@ -303,7 +304,7 @@ async function main() {
       // Used by node
       main: exports.node || (outputs.node && exports.default),
       // Used by bundlers like rollup and CDNs
-      module: outputs.browser && exports.default,
+      module: exports.module,
       unpkg: exports.script,
       types: exports.types,
 
@@ -334,7 +335,7 @@ async function main() {
     }
 
     // Resets comments
-    Object.keys(publishManifest).forEach(key => {
+    Object.keys(publishManifest).forEach((key) => {
       if (key.startsWith('//')) {
         publishManifest[key] = undefined
       }

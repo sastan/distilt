@@ -223,7 +223,7 @@ async function main() {
     if (manifest.browser !== true) {
       Object.assign(outputs, {
         // Used by nodejs
-        node: {
+        require: {
           outfile: `./${bundleName}.cjs`,
           platform: 'node',
           target: targets.node,
@@ -293,10 +293,17 @@ async function main() {
 
   function getExports({ outputs, bundleName, manifestFile = 'package.json' }) {
     return {
+      // 1. used by bundlers
       module: relative(manifestFile, outputs.module.outfile),
+      // 2. for direct script usage
       script: outputs.script && relative(manifestFile, outputs.script.outfile),
+      // 3. typescript
       types: paths.tsconfig ? relative(manifestFile, `./${bundleName}.d.ts`) : undefined,
-      node: outputs.node && relative(manifestFile, outputs.node.outfile),
+      // 4. nodejs CJS
+      require: outputs.require && relative(manifestFile, outputs.require.outfile),
+      // 5. nodejs esm wrapper
+      node: outputs.require && relative(manifestFile, `./${bundleName}.mjs`),
+      // 6. fallback to esm
       default: relative(manifestFile, outputs.module.outfile),
     }
   }
@@ -333,7 +340,7 @@ async function main() {
             },
 
       // Used by node
-      main: exports.node,
+      main: exports.require || exports.module,
       // Used by bundlers like rollup and CDNs
       module: exports.module,
       unpkg: exports.script,
@@ -451,6 +458,40 @@ async function main() {
           console.timeEnd(logKey)
         }),
     ])
+
+    // generate esm wrapper for nodejs
+    if (outputs.require) {
+      const outfile = path.resolve(
+        path.dirname(path.resolve(paths.dist, outputs.require.outfile)),
+        exports.node,
+      )
+
+      const logKey = `Bundled ${path.relative(process.cwd(), inputFile)} -> ${path.relative(
+        process.cwd(),
+        outfile,
+      )} (esm wrapper)`
+
+      console.time(logKey)
+
+      const { init, parse } = require('es-module-lexer')
+      await init
+      const source = await fs.readFile(path.resolve(paths.dist, outputs.module.outfile), 'utf-8')
+      const [, exportedNames] = parse(source)
+
+      let wrapper = `import __$$ from ${JSON.stringify(
+        './' + path.basename(outputs.require.outfile),
+      )};\n`
+
+      wrapper += exportedNames.map((name) => `export const ${name} = __$$.${name};`).join('\n')
+
+      if (!exportedNames.includes('default')) {
+        wrapper += `\nexport default __$$;\n`
+      }
+
+      await fs.writeFile(outfile, wrapper)
+
+      console.timeEnd(logKey)
+    }
   }
 
   async function generateTypesBundle(inputFile, dtsFile) {

@@ -51,10 +51,6 @@ async function main() {
     ...manifest.optinonalDependencies,
   })
 
-  // external.forEach((id) => {
-  //   external.push(`${id}/*`)
-  // })
-
   console.log(`Bundling ${manifest.name}@${manifest.version}`)
 
   await prepare()
@@ -124,11 +120,50 @@ async function main() {
   }
 
   async function generateMultiBundles() {
+    let mainEntryFile
+
+    const resolveExternalParent = (extension = 'js') => {
+      return {
+        name: 'external:parent:' + extension,
+        setup(build) {
+          // Match all parent imports and mark them as external
+          // match: '..', '../', '../..', '../index'
+          // no match: '../helper' => this will be included in all bundles referencing it
+          build.onResolve(
+            {
+              filter: /^\.\.(\/|(\/.+)*\/index(?:\.(?:[mc]js|[jt]sx?))?)?$/,
+              namespace: 'file',
+            },
+            ({ path: file, resolveDir }) => {
+              const target = path.resolve(resolveDir, file)
+
+              const isInputFile =
+                target ===
+                path.resolve(paths.root, mainEntryFile).replace(/(?:\.(?:[mc]js|[jt]sx?))?$/, '')
+
+              file = file.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, '')
+
+              const basename = isInputFile
+                ? globalName
+                : path.basename(target.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, ''))
+
+              return {
+                path: `${file}/${basename}.${extension}`,
+                external: true,
+              }
+            },
+          )
+        },
+      }
+    }
+
     await Promise.all(
       Object.entries(manifest.exports)
         .filter(([entryPoint, inputFile]) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
         .map(async ([entryPoint, inputFile], index, entryPoints) => {
           if (entryPoint === '.') {
+            mainEntryFile = inputFile
+
             const exports = {}
 
             await Promise.all(
@@ -173,21 +208,9 @@ async function main() {
             globalName: globalName + entryPoint.slice(1).replace(/\//g, '.'),
             inputFile,
             plugins: [
-              {
-                name: 'external:parent',
-                setup(build) {
-                  // Match all parent imports and mark them as external
-                  // match: '..', '../', '../..', '../index'
-                  // no match: '../helper' => this will be included in all bundles referencing it
-                  build.onResolve(
-                    { filter: /^\.\.(\/\.\.)*(\/|\/index(?:\.(?:[mc]js|[jt]sx?))?)?$/ },
-                    ({ path }) => ({
-                      path: path.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, ''),
-                      external: true,
-                    }),
-                  )
-                },
-              },
+              resolveExternalParent('js'),
+              resolveExternalParent('cjs'),
+              resolveExternalParent('umd.js'),
             ],
           })
         }),
@@ -208,6 +231,18 @@ async function main() {
           define: {
             'process.browser': 'false',
           },
+        },
+        // Used by wmr
+        module: {
+          outfile: `./${bundleName}.js`,
+          platform: 'node',
+          target: targets.node,
+          format: 'esm',
+          define: {
+            'process.browser': 'false',
+          },
+          // Bundle all dependencies
+          external: false,
         },
       })
     }
@@ -245,7 +280,7 @@ async function main() {
               format: 'umd',
               name: camelize(globalName),
               globals: (id) => {
-                return { jquery: '$', lodash: '_' }[id] || camelize(id, globalName)
+                return { jquery: '$', lodash: '_' }[id] || camelize(id, globalName, paths.dist)
               },
             },
           },
@@ -258,15 +293,11 @@ async function main() {
 
   function getExports({ outputs, bundleName, manifestFile = 'package.json' }) {
     return {
-      module: outputs.module && relative(manifestFile, outputs.module.outfile),
+      module: relative(manifestFile, outputs.module.outfile),
       script: outputs.script && relative(manifestFile, outputs.script.outfile),
       types: paths.tsconfig ? relative(manifestFile, `./${bundleName}.d.ts`) : undefined,
-      // Only add if we have browser and node bundles
-      node: outputs.module && outputs.node && relative(manifestFile, outputs.node.outfile),
-      default: relative(
-        manifestFile,
-        outputs.module ? outputs.module.outfile : outputs.node.outfile,
-      ),
+      node: outputs.node && relative(manifestFile, outputs.node.outfile),
+      default: relative(manifestFile, outputs.module.outfile),
     }
   }
 
@@ -302,7 +333,7 @@ async function main() {
             },
 
       // Used by node
-      main: exports.node || (outputs.node && exports.default),
+      main: exports.node,
       // Used by bundlers like rollup and CDNs
       module: exports.module,
       unpkg: exports.script,
@@ -366,9 +397,12 @@ async function main() {
             charset: 'utf8',
             resolveExtensions,
             bundle: true,
-            external: rollup
-              ? external.filter((dependency) => !bundledDependencies.includes(dependency))
-              : external,
+            external:
+              output.external === false
+                ? []
+                : rollup
+                ? external.filter((dependency) => !bundledDependencies.includes(dependency))
+                : external,
             mainFields: [
               'esnext',
               output.platform === 'browser' && 'browser:module',
@@ -379,7 +413,23 @@ async function main() {
             ].filter(Boolean),
             sourcemap: true,
             tsconfig: paths.tsconfig,
-            plugins,
+            plugins:
+              plugins &&
+              plugins
+                .filter(
+                  (plugin) =>
+                    !plugin.name.startsWith('external:parent:') ||
+                    (rollup
+                      ? plugin.name.endsWith(':umd.js')
+                      : output.format === 'cjs'
+                      ? plugin.name.endsWith(':cjs')
+                      : true),
+                )
+                .concat(
+                  output.format === 'esm' && output.platform === 'node'
+                    ? [markBuiltinModules()]
+                    : [],
+                ),
           })
 
           if (rollup) {
@@ -499,18 +549,32 @@ function relative(from, to) {
   return p[0] === '.' ? p : './' + p
 }
 
-function camelize(str, globalName) {
-  if (str.startsWith('.')) {
-    for (var i = globalName.split('.'), n = str.split('/'); '..' == n[0]; ) {
-      n.shift()
-      i.pop()
-    }
-
-    str = i.concat(n).join('.')
+function camelize(str, globalName, root) {
+  if (str.startsWith(root)) {
+    str = path.dirname(str).slice(root.length + 1)
+    str = [globalName.split('.')[0], str].filter(Boolean).join('/')
   }
 
   return str.replace(/\W/g, ' ').replace(/(?:^\w|[A-Z]|\b\w|\s+)/g, function (match, index) {
     if (+match === 0) return '' // or if (/\s+/.test(match)) for white spaces
     return index === 0 ? match.toLowerCase() : match.toUpperCase()
   })
+}
+
+function markBuiltinModules() {
+  const builtin = require('module').builtinModules
+
+  return {
+    name: 'markBuiltinModules',
+    setup(build) {
+      build.onResolve({ filter: /^[^.]/ }, ({ path }) => {
+        if (builtin.includes(path)) {
+          return {
+            path: 'node:' + path,
+            external: true,
+          }
+        }
+      })
+    },
+  }
 }

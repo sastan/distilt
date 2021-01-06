@@ -372,22 +372,15 @@ async function main() {
       'size-limit': undefined,
     }
 
-    // Resets comments
-    Object.keys(publishManifest).forEach((key) => {
-      if (key.startsWith('//')) {
-        publishManifest[key] = undefined
-      }
-    })
-
     await fs.mkdir(path.dirname(manifestPath), { recursive: true })
-    await fs.writeFile(manifestPath, JSON.stringify(publishManifest, null, 2))
+    await fs.writeFile(manifestPath, JSON.stringify(publishManifest, omitComments, 2))
 
     await Promise.all([
       exports.types &&
         generateTypesBundle(inputFile, path.resolve(path.dirname(manifestPath), exports.types)),
       ...Object.entries(outputs)
         .filter(([, output]) => output)
-        .map(async ([, { rollup, ...output }]) => {
+        .map(async ([key, { rollup, ...output }]) => {
           const outfile = path.resolve(paths.dist, output.outfile)
 
           const logKey = `Bundled ${path.relative(process.cwd(), inputFile)} -> ${path.relative(
@@ -456,42 +449,48 @@ async function main() {
           }
 
           console.timeEnd(logKey)
+
+          // generate esm wrapper for nodejs
+          if (outputs.require && key === 'module') {
+            const wrapperfile = path.resolve(
+              path.dirname(path.resolve(paths.dist, outputs.require.outfile)),
+              exports.node,
+            )
+
+            const logKey = `Bundled ${path.relative(process.cwd(), inputFile)} -> ${path.relative(
+              process.cwd(),
+              wrapperfile,
+            )} (esm wrapper)`
+
+            console.time(logKey)
+
+            const { init, parse } = require('es-module-lexer')
+            await init
+            const source = await fs.readFile(outfile, 'utf-8')
+            const [, exportedNames] = parse(source)
+
+            let wrapper = `import __$$ from ${JSON.stringify(
+              './' + path.basename(outputs.require.outfile),
+            )};\n`
+
+            const namedExports = exportedNames.filter((name) => name !== 'default')
+
+            if (namedExports.length) {
+              wrapper += `export const { ${namedExports.join(', ')} } = __$$;\n`
+            }
+
+            if (exportedNames.includes('default')) {
+              wrapper += `export default __$$.default;\n`
+            } else {
+              wrapper += `export default __$$;\n`
+            }
+
+            await fs.writeFile(wrapperfile, wrapper)
+
+            console.timeEnd(logKey)
+          }
         }),
     ])
-
-    // generate esm wrapper for nodejs
-    if (outputs.require) {
-      const outfile = path.resolve(
-        path.dirname(path.resolve(paths.dist, outputs.require.outfile)),
-        exports.node,
-      )
-
-      const logKey = `Bundled ${path.relative(process.cwd(), inputFile)} -> ${path.relative(
-        process.cwd(),
-        outfile,
-      )} (esm wrapper)`
-
-      console.time(logKey)
-
-      const { init, parse } = require('es-module-lexer')
-      await init
-      const source = await fs.readFile(path.resolve(paths.dist, outputs.module.outfile), 'utf-8')
-      const [, exportedNames] = parse(source)
-
-      let wrapper = `import __$$ from ${JSON.stringify(
-        './' + path.basename(outputs.require.outfile),
-      )};\n`
-
-      wrapper += exportedNames.map((name) => `export const ${name} = __$$.${name};`).join('\n')
-
-      if (!exportedNames.includes('default')) {
-        wrapper += `\nexport default __$$;\n`
-      }
-
-      await fs.writeFile(outfile, wrapper)
-
-      console.timeEnd(logKey)
-    }
   }
 
   async function generateTypesBundle(inputFile, dtsFile) {
@@ -618,4 +617,12 @@ function markBuiltinModules() {
       })
     },
   }
+}
+
+function omitComments(key, value) {
+  if (key.startsWith('//')) {
+    return undefined
+  }
+
+  return value
 }

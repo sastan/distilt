@@ -370,6 +370,8 @@ async function main() {
       prettier: undefined,
       np: undefined,
       'size-limit': undefined,
+      'lint-staged': undefined,
+      husky: undefined,
     }
 
     await fs.mkdir(path.dirname(manifestPath), { recursive: true })

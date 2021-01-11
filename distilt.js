@@ -241,8 +241,6 @@ async function main() {
           define: {
             'process.browser': 'false',
           },
-          // Bundle all dependencies
-          external: false,
         },
       })
     }

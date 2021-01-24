@@ -17,9 +17,9 @@ function findPaths() {
   const dist = path.resolve(root, 'dist')
 
   const manifest = path.resolve(root, 'package.json')
-  const tsconfig = path.resolve(root, 'tsconfig.json')
+  const tsconfig = require('find-up').sync('tsconfig.json', { cwd: root })
 
-  return { root, dist, manifest, tsconfig: existsSync(tsconfig) && tsconfig }
+  return { root, dist, manifest, tsconfig }
 }
 
 async function main() {
@@ -502,10 +502,13 @@ async function main() {
     )}`
     console.time(logKey)
 
+    inputFile = path.relative(path.dirname(paths.tsconfig), path.resolve(process.cwd(), inputFile))
+
     // './src/shim/index.ts'
     // => '.types/src/shim/index.ts'
     // => '.types/shim/index.ts'
     // => '.types/index.ts'
+
     const parts = inputFile.replace(/\.(ts|tsx)$/, '.d.ts').split('/')
     let sourceDtsFile = path.resolve(typesDirectory, parts.join('/'))
 

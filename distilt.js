@@ -342,6 +342,7 @@ async function main() {
       // Used by bundlers like rollup and CDNs
       module: exports.module,
       unpkg: exports.script,
+      'umd:main': exports.script,
       types: exports.types,
 
       // Allow publish

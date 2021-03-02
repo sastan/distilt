@@ -113,7 +113,11 @@ async function main() {
     )
 
     await Promise.all(
-      files.map((file) => fs.copyFile(path.resolve(paths.root, file), path.join(paths.dist, file))),
+      files.map(async (file) => {
+        const target = path.join(paths.dist, file)
+        await fs.mkdir(path.dirname(target), { recursive: true })
+        await fs.copyFile(path.resolve(paths.root, file), target)
+      }),
     )
 
     console.timeEnd('Copied files to ' + path.relative(process.cwd(), paths.dist))

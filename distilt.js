@@ -126,33 +126,31 @@ async function main() {
   async function generateMultiBundles() {
     let mainEntryFile
 
-    const resolveExternalParent = (extension = 'js') => {
+    const resolveExternalParent = () => {
       return {
-        name: 'external:parent:' + extension,
+        name: 'external:parent',
         setup(build) {
           // Match all parent imports and mark them as external
           // match: '..', '../', '../..', '../index'
           // no match: '../helper' => this will be included in all bundles referencing it
           build.onResolve(
             {
-              filter: /^\.\.(\/|(\/.+)*\/index(?:\.(?:[mc]js|[jt]sx?))?)?$/,
+              filter: /^\.\.?(\/|(\/.+)*\/index(?:\.(?:[mc]js|[jt]sx?))?)?$/,
               namespace: 'file',
             },
             ({ path: file, resolveDir }) => {
-              const target = path.resolve(resolveDir, file)
+              const target = path
+                .resolve(resolveDir, file)
+                .replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, '')
 
-              const isInputFile =
-                target ===
-                path.resolve(paths.root, mainEntryFile).replace(/(?:\.(?:[mc]js|[jt]sx?))?$/, '')
+              const inputFile = path
+                .resolve(paths.root, mainEntryFile)
+                .replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, '')
 
-              file = file.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, '')
-
-              const basename = isInputFile
-                ? globalName
-                : path.basename(target.replace(/\/index(?:\.(?:[mc]js|[jt]sx?))?$/, ''))
+              const internalModule = path.relative(inputFile, target)
 
               return {
-                path: `${file}/${basename}.${extension}`,
+                path: globalName + (internalModule ? `/${internalModule}` : ''),
                 external: true,
               }
             },
@@ -211,11 +209,7 @@ async function main() {
             bundleName: path.relative('.', path.join(entryPoint, path.basename(entryPoint))),
             globalName: globalName + entryPoint.slice(1).replace(/\//g, '.'),
             inputFile,
-            plugins: [
-              resolveExternalParent('js'),
-              resolveExternalParent('cjs'),
-              resolveExternalParent('umd.js'),
-            ],
+            plugins: [resolveExternalParent()],
           })
         }),
     )
@@ -418,23 +412,10 @@ async function main() {
             ].filter(Boolean),
             sourcemap: true,
             tsconfig: paths.tsconfig,
-            plugins:
-              plugins &&
-              plugins
-                .filter(
-                  (plugin) =>
-                    !plugin.name.startsWith('external:parent:') ||
-                    (rollup
-                      ? plugin.name.endsWith(':umd.js')
-                      : output.format === 'cjs'
-                      ? plugin.name.endsWith(':cjs')
-                      : true),
-                )
-                .concat(
-                  output.format === 'esm' && output.platform === 'node'
-                    ? [markBuiltinModules()]
-                    : [],
-                ),
+            plugins: [
+              ...(plugins || []),
+              output.format === 'esm' && output.platform === 'node' && markBuiltinModules(),
+            ].filter(Boolean),
           })
 
           if (rollup) {

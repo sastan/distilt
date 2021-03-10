@@ -51,6 +51,9 @@ async function main() {
     ...manifest.optinonalDependencies,
   })
 
+  // The package itself is external as well
+  external.push(manifest.name)
+
   console.log(`Bundling ${manifest.name}@${manifest.version}`)
 
   await prepare()

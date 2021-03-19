@@ -58,7 +58,7 @@ async function main() {
 
   await prepare()
 
-  const service = await require('esbuild').startService()
+  const service = require('esbuild')
 
   const typesDirectoryPromise = paths.tsconfig && generateTypescriptDeclarations()
 
@@ -407,12 +407,24 @@ async function main() {
                 : external,
             mainFields: [
               'esnext',
+              'esmodules',
+              'modern',
               output.platform === 'browser' && 'browser:module',
               output.platform === 'browser' && 'browser',
               'es2015',
               'module',
+              'jsnext:main',
               'main',
             ].filter(Boolean),
+            conditions: [
+              'production',
+              'esmodules',
+              'module',
+              output.platform === 'browser' ? 'node' : 'browser',
+              'import',
+              'require',
+              'default',
+            ],
             sourcemap: true,
             tsconfig: paths.tsconfig,
             plugins: [

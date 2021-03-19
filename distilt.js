@@ -35,7 +35,8 @@ async function main() {
   // TODO read from manifest.engines
   const targets = {
     node: 'node10.13',
-    browser: ['chrome79', 'firefox78', 'safari13.1', 'edge79'],
+    browser: 'es2018',
+    esnext: 'esnext',
   }
 
   // Bundled dependencies are included in the the output bundle
@@ -75,8 +76,6 @@ async function main() {
           }),
     ])
   } finally {
-    service.stop()
-
     const typesDirectory = await typesDirectoryPromise
     typesDirectory && fs.rmdir(typesDirectory, { force: true, recursive: true })
   }
@@ -243,6 +242,15 @@ async function main() {
             'process.browser': 'false',
           },
         },
+        esnext: {
+          outfile: `./${bundleName}.esnext.js`,
+          platform: 'node',
+          target: targets.esnext,
+          format: 'esm',
+          define: {
+            'process.browser': 'false',
+          },
+        },
       })
     }
 
@@ -258,6 +266,13 @@ async function main() {
           outfile: `./${bundleName}.js`,
           platform: 'browser',
           target: targets.browser,
+          format: 'esm',
+          minify: true,
+        },
+        esnext: {
+          outfile: `./${bundleName}.esnext.js`,
+          platform: 'browser',
+          target: targets.esnext,
           format: 'esm',
           minify: true,
         },
@@ -292,17 +307,19 @@ async function main() {
 
   function getExports({ outputs, bundleName, manifestFile = 'package.json' }) {
     return {
-      // 1. used by bundlers
+      // used by bundlers
+      esnext: relative(manifestFile, outputs.esnext.outfile),
+      // used by bundlers
       module: relative(manifestFile, outputs.module.outfile),
-      // 2. for direct script usage
+      // for direct script usage
       script: outputs.script && relative(manifestFile, outputs.script.outfile),
-      // 3. typescript
+      // typescript
       types: paths.tsconfig ? relative(manifestFile, `./${bundleName}.d.ts`) : undefined,
-      // 4. nodejs CJS
+      // nodejs CJS
       require: outputs.require && relative(manifestFile, outputs.require.outfile),
-      // 5. nodejs esm wrapper
+      // nodejs esm wrapper
       node: outputs.require && relative(manifestFile, `./${bundleName}.mjs`),
-      // 6. fallback to esm
+      // fallback to esm
       default: relative(manifestFile, outputs.module.outfile),
     }
   }
@@ -341,6 +358,7 @@ async function main() {
       // Used by node
       main: exports.require || exports.module,
       // Used by bundlers like rollup and CDNs
+      esnext: exports.esnext,
       module: exports.module,
       unpkg: exports.script,
       'umd:main': exports.script,

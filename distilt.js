@@ -34,7 +34,7 @@ async function main() {
 
   // TODO read from manifest.engines
   const targets = {
-    node: 'node10.13',
+    node: 'es2019',
     browser: 'es2018',
     esnext: 'esnext',
   }

@@ -14,7 +14,7 @@
   "main": "./distilt.js",
   "bin": "./distilt.js",
   "files": [
-    "distilt.js"
+    "*.js"
   ],
   "scripts": {
     "format": "prettier --write --ignore-path .gitignore .",

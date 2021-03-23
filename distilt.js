@@ -410,8 +410,19 @@ async function main() {
 
           console.time(logKey)
 
+          const env =
+            output.platform === 'node' && output.format === 'cjs'
+              ? {
+                  inject: [require.resolve('./shim-node-cjs.js')],
+                  define: {
+                    'import.meta.url': 'shim_import_meta_url',
+                  },
+                }
+              : {}
+
           await build({
             ...output,
+            ...env,
             outfile,
             entryPoints: [inputFile],
             charset: 'utf8',

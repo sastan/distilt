@@ -59,7 +59,7 @@ async function main() {
 
   await prepare()
 
-  const service = require('esbuild')
+  const { build } = require('esbuild')
 
   const typesDirectoryPromise = paths.tsconfig && generateTypescriptDeclarations()
 
@@ -410,7 +410,7 @@ async function main() {
 
           console.time(logKey)
 
-          await service.build({
+          await build({
             ...output,
             outfile,
             entryPoints: [inputFile],

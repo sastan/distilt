@@ -267,14 +267,12 @@ async function main() {
           platform: 'browser',
           target: targets.browser,
           format: 'esm',
-          minify: true,
         },
         esnext: {
           outfile: `./${bundleName}.esnext.js`,
           platform: 'browser',
           target: targets.esnext,
           format: 'esm',
-          minify: true,
         },
         // Can be used from a normal script tag without module system.
         script: {

@@ -497,7 +497,13 @@ async function main() {
             const source = await fs.readFile(outfile, 'utf-8')
             const [, exportedNames] = parse(source)
 
-            let wrapper = `import __$$ from ${JSON.stringify(
+            let wrapper = ''
+            const starExports = source.match(/^\s*(export\s+\*\s+from\s*(['"])[^]+?\2)/gm)
+            if (starExports) {
+              wrapper += (starExports).join(';\n') + ';\n'
+            }
+
+            wrapper += `import __$$ from ${JSON.stringify(
               './' + path.basename(outputs.require.outfile),
             )};\n`
 

@@ -77,7 +77,7 @@ async function main() {
     ])
   } finally {
     const typesDirectory = await typesDirectoryPromise
-    typesDirectory && fs.rmdir(typesDirectory, { force: true, recursive: true })
+    typesDirectory && (fs.rm || fs.rmdir)(typesDirectory, { force: true, recursive: true })
   }
 
   if (manifest['size-limit']) {
@@ -86,7 +86,7 @@ async function main() {
 
   async function prepare() {
     // Cleanup old build
-    await fs.rmdir(paths.dist, { recursive: true, force: true })
+    await (fs.rm || fs.rmdir)(paths.dist, { recursive: true, force: true })
 
     // Prepare next one
     await fs.mkdir(paths.dist, { recursive: true })

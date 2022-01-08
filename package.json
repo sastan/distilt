@@ -17,7 +17,7 @@
     "*.js"
   ],
   "scripts": {
-    "format": "prettier --write --ignore-path .gitignore .",
+    "format": "prettier --write --ignore-path .gitignore . '!pnpm-lock.yaml'",
     "release": "npx np --yolo",
     "preinstall": "npx only-allow pnpm"
   },

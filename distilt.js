@@ -13,6 +13,7 @@ import { rollup } from 'rollup'
 import dts from 'rollup-plugin-dts'
 import { init, parse } from 'es-module-lexer'
 import { execa } from 'execa'
+import merge from 'merge-source-map'
 
 main().catch((error) => {
   console.error(error)
@@ -85,7 +86,8 @@ async function main() {
 
   // TODO read from manifest.engines
   const targets = {
-    node: 'node12.4',
+    // TODO node12.4 seems to be broken
+    node: 'es2020',
     module: 'es2021',
     script: 'es2017',
     esnext: 'esnext',
@@ -240,13 +242,15 @@ async function main() {
             // typescript
             types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
             // Node.js
-            node: {
-              // used by bundlers
-              module: outputFile + '.js',
-              // nodejs esm wrapper
-              import: outputFile + '.mjs',
-              require: outputFile + '.cjs',
-            },
+            node: manifest.browser
+              ? undefined
+              : {
+                  // used by bundlers
+                  module: outputFile + '.js',
+                  // nodejs esm wrapper
+                  import: outputFile + '.mjs',
+                  require: outputFile + '.cjs',
+                },
             // fallback to esm
             default: outputFile + '.js',
           }
@@ -291,18 +295,14 @@ async function main() {
             chunkNames: `_/chunks/[name]-[hash]`,
             assetNames: `_/assets/[name]-[hash]`,
 
-            platform: manifest.browser
-              ? 'browser'
-              : manifest.browser === false
-              ? 'node'
-              : 'neutral',
+            platform: manifest.browser ? 'browser' : 'node',
             target: targets.esnext,
             format: 'esm',
             define:
               manifest.browser == null
                 ? undefined
                 : {
-                    'process.browser': JSON.stringify(manifest.browser),
+                    'process.browser': JSON.stringify(!!manifest.browser),
                   },
 
             metafile: true,
@@ -331,6 +331,7 @@ async function main() {
               'default',
             ].filter(Boolean),
             sourcemap: true,
+            sourcesContent: false,
             tsconfig: paths.tsconfig,
           })
           console.timeEnd('Generated esnext bundles')
@@ -349,11 +350,7 @@ async function main() {
             chunkNames: `_/chunks/[name]-[hash]`,
             assetNames: `_/assets/[name]-[hash]`,
 
-            platform: manifest.browser
-              ? 'browser'
-              : manifest.browser === false
-              ? 'node'
-              : 'neutral',
+            platform: manifest.browser ? 'browser' : 'node',
             target: targets.module,
             format: 'esm',
             define:
@@ -389,6 +386,7 @@ async function main() {
               'default',
             ].filter(Boolean),
             sourcemap: true,
+            sourcesContent: false,
             tsconfig: paths.tsconfig,
           })
           console.timeEnd('Generated module bundles')
@@ -437,27 +435,26 @@ async function main() {
         async () => {
           console.time('Generated Node.js cjs bundles')
           // Build node bundle
-          await esbuild.build({
+          // 1. create a esm build to have code-splitting
+          let result = await esbuild.build({
             entryPoints,
 
             outdir: paths.dist,
             outbase: '.',
             bundle: true,
-            // splitting: true,
+            splitting: true,
             entryNames: `[dir]/[name]`,
             chunkNames: `_/chunks/[name]-[hash]`,
             assetNames: `_/assets/[name]-[hash]`,
 
             platform: 'node',
-            target: targets.module,
-            format: 'cjs',
+            target: targets.node,
+            format: 'esm',
             outExtension: { '.js': '.cjs' },
-            define: {
-              'process.browser': false,
-            },
-
+            // TODO this is broken and generated invalid url
             inject: [fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url))],
             define: {
+              'process.browser': false,
               'import.meta.url': 'shim_import_meta_url',
               'import.meta.resolve': 'shim_import_meta_resolve',
             },
@@ -486,10 +483,37 @@ async function main() {
               'import',
               'require',
               'default',
-            ].filter(Boolean),
+            ],
             sourcemap: true,
+            sourcesContent: false,
             tsconfig: paths.tsconfig,
           })
+
+          // 2. transform each output file to cjs
+          await Promise.all(
+            Object.keys(result.metafile.outputs)
+              .filter((file) => file.endsWith('.cjs'))
+              .map(async (file) => {
+                const content = await fs.readFile(file, { encoding: 'utf8' })
+
+                const result = await esbuild.transform(content, {
+                  target: targets.node,
+                  format: 'cjs',
+                  charset: 'utf8',
+                  sourcefile: file,
+                  sourcemap: true,
+                  sourcesContent: false,
+                })
+
+                await fs.writeFile(file, result.code + `\n//# sourceMappingURL=${file}.map`)
+
+                const oldMap = JSON.parse(await fs.readFile(file + '.map', { encoding: 'utf8' }))
+                const newMap = JSON.parse(result.map)
+
+                await fs.writeFile(file + '.map', JSON.stringify(merge(oldMap, newMap), null, 2))
+              }),
+          )
+
           console.timeEnd('Generated Node.js cjs bundles')
         },
         async () => {
@@ -517,6 +541,7 @@ async function main() {
                   minify: true,
                   define: {
                     'process.browser': true,
+                    'process.env.NODE_ENV': `"production"`,
                   },
 
                   metafile: true,
@@ -541,12 +566,12 @@ async function main() {
                     'esmodules',
                     'es2015',
                     'module',
-                    manifest.browser === false && 'node',
                     'import',
                     'require',
                     'default',
-                  ].filter(Boolean),
+                  ],
                   sourcemap: true,
+                  sourcesContent: false,
                   tsconfig: paths.tsconfig,
                   plugins: [
                     {
@@ -611,6 +636,7 @@ async function main() {
       format: 'esm',
       file: dtsFile,
       sourcemap: true,
+      sourcemapExcludeSources: true,
       preferConst: true,
       exports: 'auto',
     })
@@ -643,7 +669,7 @@ async function main() {
           ],
           compilerOptions: {
             target: 'ESNext',
-            module: manifest.browser === false ? 'CommonJS' : 'ESNext',
+            module: 'ESNext',
             emitDeclarationOnly: true,
             noEmit: false,
             outDir: typesDirectory,

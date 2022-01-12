@@ -222,11 +222,9 @@ async function main() {
   }
 
   async function generateMultiBundles() {
-    ;[]
     let mainEntryPoint
 
     const entryPoints = Object.entries(publishManifest.exports)
-      .filter(([entryPoint, inputFile]) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
       .map(([entryPoint, conditions]) => {
         if (typeof conditions == 'string') {
           conditions = { default: conditions }
@@ -234,6 +232,12 @@ async function main() {
 
         // Support default -> neutral, browser -> browser, node -> node
         if (!(conditions.default || conditions.browser || conditions.node)) {
+          return
+        }
+
+        if (
+          !Object.values(conditions).every((inputFile) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
+        ) {
           return
         }
 
@@ -299,22 +303,29 @@ async function main() {
     await Promise.all(
       [
         async () => {
+          const inputs = entryPoints.map(({ outputFile, conditions }) => [
+            outputFile,
+            conditions.default || conditions.browser || conditions.node,
+          ])
+
+          if (!inputs.length) return
+
           console.time('Generated esnext bundles')
 
           const bundle = await rollup({
-            input: Object.fromEntries(
-              entryPoints.map(({ outputFile, conditions }) => [
-                outputFile,
-                conditions.default || conditions.browser || conditions.node,
-              ]),
-            ),
+            input: Object.fromEntries(inputs),
             external,
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
             },
             onwarn(warning, warn) {
-              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+              if (
+                warning.code === 'CIRCULAR_DEPENDENCY' ||
+                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+              ) {
+                return
+              }
 
               // Use default for everything else
               warn(warning)
@@ -384,22 +395,29 @@ async function main() {
           console.timeEnd('Generated esnext bundles')
         },
         async () => {
+          const inputs = entryPoints.map(({ outputFile, conditions }) => [
+            outputFile,
+            conditions.default || conditions.browser || conditions.node,
+          ])
+
+          if (!inputs.length) return
+
           console.time('Generated module bundles')
 
           const bundle = await rollup({
-            input: Object.fromEntries(
-              entryPoints.map(({ outputFile, conditions }) => [
-                outputFile,
-                conditions.default || conditions.browser || conditions.node,
-              ]),
-            ),
+            input: Object.fromEntries(inputs),
             external,
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
             },
             onwarn(warning, warn) {
-              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+              if (
+                warning.code === 'CIRCULAR_DEPENDENCY' ||
+                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+              ) {
+                return
+              }
 
               // Use default for everything else
               warn(warning)
@@ -469,22 +487,29 @@ async function main() {
           console.timeEnd('Generated module bundles')
         },
         async () => {
+          const inputs = entryPoints.map(({ outputFile, conditions }) => [
+            outputFile,
+            conditions.node || conditions.default,
+          ])
+
+          if (!inputs.length) return
+
           console.time('Generated Node.js cjs bundles')
 
           const bundle = await rollup({
-            input: Object.fromEntries(
-              entryPoints.map(({ outputFile, conditions }) => [
-                outputFile,
-                conditions.node || conditions.default,
-              ]),
-            ),
+            input: Object.fromEntries(inputs),
             external,
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
             },
             onwarn(warning, warn) {
-              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+              if (
+                warning.code === 'CIRCULAR_DEPENDENCY' ||
+                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+              ) {
+                return
+              }
 
               // Use default for everything else
               warn(warning)
@@ -606,128 +631,135 @@ async function main() {
           console.timeEnd('Generated Node.js esm wrappers')
         },
         async () => {
+          const inputs = entryPoints.filter(
+            ({ conditions }) => conditions.browser || conditions.default,
+          )
+
+          if (!inputs.length) return
+
           console.time('Generated browser global bundles')
 
           await Promise.all(
-            entryPoints
-              .filter(({ conditions }) => conditions.browser || conditions.default)
-              .map(async ({ outputFile, conditions }) => {
-                const inputFile = conditions.browser || conditions.default
+            inputs.map(async ({ outputFile, conditions }) => {
+              const inputFile = conditions.browser || conditions.default
 
-                const bundle = await rollup({
-                  input: inputFile,
-                  external: external.filter(
-                    (dependency) => !bundledDependencies.includes(dependency),
-                  ),
-                  preserveEntrySignatures: 'strict',
-                  treeshake: {
-                    propertyReadSideEffects: false,
-                  },
-                  onwarn(warning, warn) {
-                    if (warning.code === 'CIRCULAR_DEPENDENCY') return
+              const bundle = await rollup({
+                input: inputFile,
+                external: external.filter(
+                  (dependency) => !bundledDependencies.includes(dependency),
+                ),
+                preserveEntrySignatures: 'strict',
+                treeshake: {
+                  propertyReadSideEffects: false,
+                },
+                onwarn(warning, warn) {
+                  // Not checking for unresolved import here — they should all be there
+                  if (warning.code === 'CIRCULAR_DEPENDENCY') {
+                    return
+                  }
 
-                    // Use default for everything else
-                    warn(warning)
-                  },
-                  plugins: [
-                    nodeResolve({
-                      browser: true,
-                      extensions: resolveExtensions,
-                      mainFields: [
-                        'esnext',
-                        'esmodules',
-                        'modern',
-                        'es2015',
-                        'module',
-                        'browser',
-                        'jsnext:main',
-                        'main',
-                      ],
-                      exportConditions: [
-                        'production',
-                        'esnext',
-                        'modern',
-                        'esmodules',
-                        'es2015',
-                        'module',
-                        'import',
-                        'default',
-                        'require',
-                        'browser',
-                      ],
-                    }),
-                    esbuild({
-                      exclude: null,
-                      // platform: 'neutral',
-                      target: targets.script,
-                      tsconfig: paths.tsconfig,
-                      // TODO optimizeDeps: ['vue', 'vue-router'],
-                      define: {
-                        'process.browser': true,
-                        'process.env.NODE_ENV': `"production"`,
-                      },
-                      // TODO maybe configurable
-                      loaders: {
-                        // Add .json files support
-                        // require @rollup/plugin-commonjs
-                        '.json': 'json',
-                        // Enable JSX in .js files too
-                        '.js': 'jsx',
-                      },
-                    }),
-                    dynamicImportVars({ warnOnError: true }),
-                  ],
-                })
+                  // Use default for everything else
+                  warn(warning)
+                },
+                plugins: [
+                  nodeResolve({
+                    browser: true,
+                    extensions: resolveExtensions,
+                    mainFields: [
+                      'esnext',
+                      'esmodules',
+                      'modern',
+                      'es2015',
+                      'module',
+                      'browser',
+                      'jsnext:main',
+                      'main',
+                    ],
+                    exportConditions: [
+                      'production',
+                      'esnext',
+                      'modern',
+                      'esmodules',
+                      'es2015',
+                      'module',
+                      'import',
+                      'default',
+                      'require',
+                      'browser',
+                    ],
+                  }),
+                  esbuild({
+                    exclude: null,
+                    // platform: 'neutral',
+                    target: targets.script,
+                    tsconfig: paths.tsconfig,
+                    // TODO optimizeDeps: ['vue', 'vue-router'],
+                    define: {
+                      'process.browser': true,
+                      'process.env.NODE_ENV': `"production"`,
+                    },
+                    // TODO maybe configurable
+                    loaders: {
+                      // Add .json files support
+                      // require @rollup/plugin-commonjs
+                      '.json': 'json',
+                      // Enable JSX in .js files too
+                      '.js': 'jsx',
+                    },
+                  }),
+                  dynamicImportVars({ warnOnError: true }),
+                ],
+              })
 
-                await bundle.write({
-                  format: 'iife',
-                  file: path.resolve(paths.dist, `${outputFile}.global.js`),
-                  assetFileNames: '_/assets/[name]-[hash][extname]',
-                  name:
-                    mainEntryPoint == outputFile
-                      ? globalName
-                      : camelize(globalName + '-' + outputFile),
-                  // TODO configureable globals
-                  globals: (id) => {
-                    return (
-                      {
-                        lodash: '_',
-                        'lodash-es': '_',
-                        jquery: '$',
-                      }[id] || camelize(id)
-                    )
-                  },
-                  generatedCode: 'es2015',
-                  preferConst: true,
-                  hoistTransitiveImports: false,
-                  interop: 'auto',
-                  minifyInternalExports: true,
-                  sourcemap: true,
-                  sourcemapExcludeSources: true,
-                  freeze: false,
-                  esModule: false,
-                  plugins: [
-                    terser({
-                      ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
-                      warnings: true,
-                      compress: {
-                        keep_infinity: true,
-                        pure_getters: true,
-                        // Ideally we'd just get Terser to respect existing Arrow functions...
-                        // unsafe_arrows: true,
-                        passes: 10,
-                      },
-                      format: {
-                        // By default, Terser wraps function arguments in extra parens to trigger eager parsing.
-                        // Whether this is a good idea is way too specific to guess, so we optimize for size by default:
-                        wrap_func_args: false,
-                      },
-                    }),
-                  ],
-                })
+              await bundle.write({
+                format: 'iife',
+                file: path.resolve(paths.dist, `${outputFile}.global.js`),
+                assetFileNames: '_/assets/[name]-[hash][extname]',
+                name:
+                  mainEntryPoint == outputFile
+                    ? globalName
+                    : camelize(globalName + '-' + outputFile),
+                // TODO configureable globals
+                globals: (id) => {
+                  return (
+                    {
+                      lodash: '_',
+                      'lodash-es': '_',
+                      jquery: '$',
+                    }[id] || camelize(id)
+                  )
+                },
+                generatedCode: 'es2015',
+                preferConst: true,
+                hoistTransitiveImports: false,
+                interop: 'auto',
+                minifyInternalExports: true,
+                sourcemap: true,
+                sourcemapExcludeSources: true,
+                freeze: false,
+                esModule: false,
+                plugins: [
+                  terser({
+                    ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
+                    warnings: true,
+                    compress: {
+                      keep_infinity: true,
+                      pure_getters: true,
+                      // Ideally we'd just get Terser to respect existing Arrow functions...
+                      // unsafe_arrows: true,
+                      passes: 10,
+                    },
+                    format: {
+                      // By default, Terser wraps function arguments in extra parens to trigger eager parsing.
+                      // Whether this is a good idea is way too specific to guess, so we optimize for size by default:
+                      wrap_func_args: false,
+                    },
+                  }),
+                ],
+              })
 
-                await bundle.close()
-              }),
+              await bundle.close()
+            }),
           )
 
           console.timeEnd('Generated browser global bundles')

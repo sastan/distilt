@@ -4,17 +4,22 @@ import { existsSync, accessSync, readFileSync } from 'fs'
 import fs from 'fs/promises'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { builtinModules } from 'module'
 
 import { findUpSync } from 'find-up'
 import normalizeData from 'normalize-package-data'
 import { globby } from 'globby'
-import * as esbuild from 'esbuild'
+
 import { rollup } from 'rollup'
+import esbuild from 'rollup-plugin-esbuild'
+import { nodeResolve } from '@rollup/plugin-node-resolve'
+import * as dynamicImportVarsNS from '@rollup/plugin-dynamic-import-vars'
+import inject from '@rollup/plugin-inject'
+import { terser } from 'rollup-plugin-terser'
 import dts from 'rollup-plugin-dts'
-import { init, parse } from 'es-module-lexer'
+
 import { execa } from 'execa'
-import merge from 'merge-source-map'
+
+const dynamicImportVars = dynamicImportVarsNS.default?.default || dynamicImportVarsNS.default
 
 main().catch((error) => {
   console.error(error)
@@ -151,6 +156,7 @@ async function main() {
     'size-limit': undefined,
     'lint-staged': undefined,
     husky: undefined,
+    mangle: undefined,
 
     // Added by normalizeData
     readme: undefined,
@@ -216,59 +222,58 @@ async function main() {
   }
 
   async function generateMultiBundles() {
-    const entryPoints = []
+    ;[]
     let mainEntryPoint
 
-    await Promise.all(
-      Object.entries(publishManifest.exports)
-        .filter(([entryPoint, inputFile]) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
-        .map(async ([entryPoint, conditions]) => {
-          if (typeof conditions == 'string') {
-            conditions = { default: conditions }
-          }
+    const entryPoints = Object.entries(publishManifest.exports)
+      .filter(([entryPoint, inputFile]) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
+      .map(([entryPoint, conditions]) => {
+        if (typeof conditions == 'string') {
+          conditions = { default: conditions }
+        }
 
-          // Support default -> neutral, browser -> browser, node -> node
-          if (!(conditions.default || conditions.browser || conditions.node)) {
-            return
-          }
+        // Support default -> neutral, browser -> browser, node -> node
+        if (!(conditions.default || conditions.browser || conditions.node)) {
+          return
+        }
 
-          const outputFile = entryPoint == '.' ? './' + manifest.name.split('/').pop() : entryPoint
+        const outputFile = entryPoint == '.' ? './' + manifest.name.split('/').pop() : entryPoint
 
-          if (entryPoint == '.') {
-            mainEntryPoint = outputFile.slice(2)
-          }
+        if (entryPoint == '.') {
+          mainEntryPoint = outputFile.slice(2)
+        }
 
-          entryPoints.push({
-            outputFile: outputFile.slice(2),
-            conditions,
-          })
+        // Define package loading
+        // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
+        publishManifest.exports[entryPoint] = {
+          // used by bundlers — compatible with current Spec and stage 4 proposals
+          esnext: outputFile + '.esnext.js',
+          // used by bundlers
+          module: outputFile + '.js',
 
-          // Define package loading
-          // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
-          publishManifest.exports[entryPoint] = {
-            // used by bundlers — compatible with current Spec and stage 4 proposals
-            esnext: outputFile + '.esnext.js',
-            // used by bundlers
-            module: outputFile + '.js',
+          // for direct script usage
+          script: (conditions.default || conditions.browser) && outputFile + '.global.js',
 
-            // for direct script usage
-            script: (conditions.default || conditions.browser) && outputFile + '.global.js',
+          // typescript
+          types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
 
-            // typescript
-            types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
+          // Node.js
+          node: (conditions.default || conditions.node) && {
+            // nodejs esm wrapper
+            import: outputFile + '.mjs',
+            require: outputFile + '.cjs',
+          },
 
-            // Node.js
-            node: (conditions.default || conditions.node) && {
-              // nodejs esm wrapper
-              import: outputFile + '.mjs',
-              require: outputFile + '.cjs',
-            },
+          // fallback to esm
+          default: outputFile + '.js',
+        }
 
-            // fallback to esm
-            default: outputFile + '.js',
-          }
-        }),
-    )
+        return {
+          outputFile: outputFile.slice(2),
+          conditions,
+        }
+      })
+      .filter(Boolean)
 
     if (publishManifest.exports['.']) {
       Object.assign(publishManifest, {
@@ -287,334 +292,445 @@ async function main() {
       })
     }
 
+    const manifestPath = path.resolve(paths.dist, 'package.json')
+    await fs.mkdir(path.dirname(manifestPath), { recursive: true })
+    await fs.writeFile(manifestPath, JSON.stringify(publishManifest, omitComments, 2))
+
     await Promise.all(
       [
         async () => {
-          const manifestPath = path.resolve(paths.dist, 'package.json')
-          await fs.mkdir(path.dirname(manifestPath), { recursive: true })
-          await fs.writeFile(manifestPath, JSON.stringify(publishManifest, omitComments, 2))
-        },
-        async () => {
           console.time('Generated esnext bundles')
-          // Build esnext bundle
-          await esbuild.build({
-            entryPoints: Object.fromEntries(
+
+          const bundle = await rollup({
+            input: Object.fromEntries(
               entryPoints.map(({ outputFile, conditions }) => [
                 outputFile,
                 conditions.default || conditions.browser || conditions.node,
               ]),
             ),
-
-            outdir: paths.dist,
-            outbase: '.',
-            bundle: true,
-            splitting: true,
-            entryNames: `[dir]/[name].esnext`,
-            chunkNames: `_/chunks/[name]-[hash]`,
-            assetNames: `_/assets/[name]-[hash]`,
-
-            platform: 'neutral',
-            target: targets.esnext,
-            format: 'esm',
-
-            metafile: true,
-            charset: 'utf8',
-            resolveExtensions,
             external,
-            mainFields: [
-              'esnext',
-              'esmodules',
-              'modern',
-              'es2015',
-              'module',
-              'jsnext:main',
-              'main',
+            preserveEntrySignatures: 'strict',
+            treeshake: {
+              propertyReadSideEffects: false,
+            },
+            onwarn(warning, warn) {
+              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+
+              // Use default for everything else
+              warn(warning)
+            },
+            plugins: [
+              nodeResolve({
+                extensions: resolveExtensions,
+                mainFields: [
+                  'esnext',
+                  'esmodules',
+                  'modern',
+                  'es2015',
+                  'module',
+                  'jsnext:main',
+                  'main',
+                ],
+                exportConditions: [
+                  'production',
+                  'esnext',
+                  'modern',
+                  'esmodules',
+                  'es2015',
+                  'module',
+                  'import',
+                  'default',
+                  'require',
+                ],
+              }),
+              esbuild({
+                exclude: null,
+                // platform: 'neutral',
+                target: targets.esnext,
+                tsconfig: paths.tsconfig,
+                // TODO optimizeDeps: ['vue', 'vue-router'],
+                // TODO maybe configurable
+                loaders: {
+                  // Add .json files support
+                  // require @rollup/plugin-commonjs
+                  '.json': 'json',
+                  // Enable JSX in .js files too
+                  '.js': 'jsx',
+                },
+              }),
+              dynamicImportVars({ warnOnError: true }),
             ],
-            conditions: [
-              'production',
-              'esnext',
-              'modern',
-              'esmodules',
-              'es2015',
-              'module',
-              'import',
-              'default',
-              'require',
-            ].filter(Boolean),
-            sourcemap: true,
-            sourcesContent: false,
-            tsconfig: paths.tsconfig,
-            plugins: [markBuiltinModules()],
           })
+
+          await bundle.write({
+            format: 'es',
+            dir: paths.dist,
+            entryFileNames: '[name].esnext.js',
+            chunkFileNames: '_/[name]-[hash].js',
+            assetFileNames: '_/assets/[name]-[hash][extname]',
+            generatedCode: 'es2015',
+            preferConst: true,
+            hoistTransitiveImports: false,
+            interop: 'auto',
+            minifyInternalExports: true,
+            sourcemap: true,
+            sourcemapExcludeSources: true,
+            freeze: false,
+            esModule: false,
+          })
+
+          await bundle.close()
+
           console.timeEnd('Generated esnext bundles')
         },
         async () => {
-          // Build modules bundle
           console.time('Generated module bundles')
-          await esbuild.build({
-            entryPoints: Object.fromEntries(
+
+          const bundle = await rollup({
+            input: Object.fromEntries(
               entryPoints.map(({ outputFile, conditions }) => [
                 outputFile,
                 conditions.default || conditions.browser || conditions.node,
               ]),
             ),
-
-            outdir: paths.dist,
-            outbase: '.',
-            bundle: true,
-            splitting: true,
-            entryNames: `[dir]/[name]`,
-            chunkNames: `_/chunks/[name]-[hash]`,
-            assetNames: `_/assets/[name]-[hash]`,
-
-            platform: 'neutral',
-            target: targets.module,
-            format: 'esm',
-
-            metafile: true,
-            charset: 'utf8',
-            resolveExtensions,
             external,
-            mainFields: [
-              'esnext',
-              'esmodules',
-              'modern',
-              'es2015',
-              'module',
-              'jsnext:main',
-              'main',
+            preserveEntrySignatures: 'strict',
+            treeshake: {
+              propertyReadSideEffects: false,
+            },
+            onwarn(warning, warn) {
+              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+
+              // Use default for everything else
+              warn(warning)
+            },
+            plugins: [
+              nodeResolve({
+                extensions: resolveExtensions,
+                mainFields: [
+                  'esnext',
+                  'esmodules',
+                  'modern',
+                  'es2015',
+                  'module',
+                  'jsnext:main',
+                  'main',
+                ],
+                exportConditions: [
+                  'production',
+                  'esnext',
+                  'modern',
+                  'esmodules',
+                  'es2015',
+                  'module',
+                  'import',
+                  'default',
+                  'require',
+                ],
+              }),
+              esbuild({
+                exclude: null,
+                // platform: 'neutral',
+                target: targets.module,
+                tsconfig: paths.tsconfig,
+                // TODO optimizeDeps: ['vue', 'vue-router'],
+                // TODO maybe configurable
+                loaders: {
+                  // Add .json files support
+                  // require @rollup/plugin-commonjs
+                  '.json': 'json',
+                  // Enable JSX in .js files too
+                  '.js': 'jsx',
+                },
+              }),
+              dynamicImportVars({ warnOnError: true }),
             ],
-            conditions: [
-              'production',
-              'esnext',
-              'modern',
-              'esmodules',
-              'es2015',
-              'module',
-              'import',
-              'default',
-              'require',
-            ].filter(Boolean),
-            sourcemap: true,
-            sourcesContent: false,
-            tsconfig: paths.tsconfig,
-            plugins: [markBuiltinModules()],
           })
+
+          await bundle.write({
+            format: 'es',
+            dir: paths.dist,
+            entryFileNames: '[name].js',
+            chunkFileNames: '_/[name]-[hash].js',
+            assetFileNames: '_/assets/[name]-[hash][extname]',
+            generatedCode: 'es2015',
+            preferConst: true,
+            hoistTransitiveImports: false,
+            interop: 'auto',
+            minifyInternalExports: true,
+            sourcemap: true,
+            sourcemapExcludeSources: true,
+            freeze: false,
+            esModule: false,
+          })
+
+          await bundle.close()
+
           console.timeEnd('Generated module bundles')
         },
         async () => {
           console.time('Generated Node.js cjs bundles')
-          // Build node bundle
-          // 1. create a esm build to have code-splitting
-          const result = await esbuild.build({
-            entryPoints: Object.fromEntries(
+
+          const bundle = await rollup({
+            input: Object.fromEntries(
               entryPoints.map(({ outputFile, conditions }) => [
                 outputFile,
                 conditions.node || conditions.default,
               ]),
             ),
-
-            outdir: paths.dist,
-            outbase: '.',
-            bundle: true,
-            splitting: true,
-            entryNames: `[dir]/[name]`,
-            chunkNames: `_/chunks/[name]-[hash]`,
-            assetNames: `_/assets/[name]-[hash]`,
-
-            platform: 'node',
-            target: targets.node,
-            format: 'esm',
-            treeShaking: true,
-            outExtension: { '.js': '.cjs' },
-            // TODO this is broken and generated invalid url
-            inject: [fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url))],
-            define: {
-              'process.browser': false,
-              'import.meta.url': 'shim_import_meta_url',
-              'import.meta.resolve': 'shim_import_meta_resolve',
-            },
-
-            metafile: true,
-            charset: 'utf8',
-            resolveExtensions,
             external,
-            mainFields: [
-              'esnext',
-              'esmodules',
-              'modern',
-              'es2015',
-              'module',
-              'jsnext:main',
-              'main',
+            preserveEntrySignatures: 'strict',
+            treeshake: {
+              propertyReadSideEffects: false,
+            },
+            onwarn(warning, warn) {
+              if (warning.code === 'CIRCULAR_DEPENDENCY') return
+
+              // Use default for everything else
+              warn(warning)
+            },
+            plugins: [
+              nodeResolve({
+                extensions: [...resolveExtensions, '.node'],
+                mainFields: [
+                  'esnext',
+                  'esmodules',
+                  'modern',
+                  'es2015',
+                  'module',
+                  'jsnext:main',
+                  'main',
+                ],
+                exportConditions: [
+                  'node',
+                  'production',
+                  'esnext',
+                  'modern',
+                  'esmodules',
+                  'es2015',
+                  'module',
+                  'import',
+                  'default',
+                  'require',
+                ],
+              }),
+              esbuild({
+                exclude: null,
+                // platform: 'neutral',
+                target: targets.node,
+                tsconfig: paths.tsconfig,
+                define: {
+                  'process.browser': false,
+                  'import.meta.url': '__$$shim_import_meta_url',
+                  'import.meta.resolve': '__$$shim_import_meta_resolve',
+                },
+
+                // TODO optimizeDeps: ['vue', 'vue-router'],
+                // TODO maybe configurable
+                loaders: {
+                  // Add .json files support
+                  // require @rollup/plugin-commonjs
+                  '.json': 'json',
+                  // Enable JSX in .js files too
+                  '.js': 'jsx',
+                },
+              }),
+              dynamicImportVars({ warnOnError: true }),
+              inject({
+                __$$shim_import_meta_url: [
+                  fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
+                  'shim_import_meta_url',
+                ],
+                __$$shim_import_meta_resolve: [
+                  fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
+                  'shim_import_meta_resolve',
+                ],
+              }),
             ],
-            conditions: [
-              'production',
-              'node',
-              'esnext',
-              'modern',
-              'esmodules',
-              'es2015',
-              'module',
-              'import',
-              'default',
-              'require',
-            ],
-            sourcemap: true,
-            sourcesContent: false,
-            tsconfig: paths.tsconfig,
           })
+
+          const { output } = await bundle.write({
+            format: 'cjs',
+            exports: 'auto',
+            dir: paths.dist,
+            entryFileNames: '[name].cjs',
+            chunkFileNames: '_/[name]-[hash].cjs',
+            assetFileNames: '_/assets/[name]-[hash][extname]',
+            generatedCode: 'es2015',
+            preferConst: true,
+            hoistTransitiveImports: false,
+            interop: 'auto',
+            minifyInternalExports: true,
+            sourcemap: true,
+            sourcemapExcludeSources: true,
+            freeze: false,
+            esModule: false,
+          })
+
+          await bundle.close()
+
+          console.timeEnd('Generated Node.js cjs bundles')
 
           // 2. generate esm wrapper for Node.js
           console.time('Generated Node.js esm wrappers')
           await Promise.all(
-            Object.entries(result.metafile.outputs)
-              .filter(([file, meta]) => meta.entryPoint && file.endsWith('.cjs'))
-              .map(async ([file, meta]) => {
-                const wrapperfile = file.replace(/\.cjs$/, '.mjs')
+            output
+              .filter((chunk) => chunk.isEntry)
+              .map(async ({ name, exports }) => {
+                // exports: [ '*@twind/core', 'default', 'toColorValue' ]
 
-                await init
-                const source = await fs.readFile(file, 'utf-8')
-                const [imports, exportedNames] = parse(source)
+                let wrapper = ''
 
-                let wrapper = imports
-                  .filter(({ n }) => /^[^.]/.test(n))
-                  .map(({ ss, se }) => source.slice(ss, se))
-                  .filter((s) => /^\s*export\s+\*\s+from/.test(s))
-                  .join(';\n')
-
-                wrapper +=
-                  (wrapper && ';\n') +
-                  `import __$$ from ${JSON.stringify(
-                    './' + path.basename(file, '.js') + '.cjs',
-                  )};\n`
-
-                const namedExports = exportedNames.filter((name) => name !== 'default')
-
-                if (namedExports.length) {
-                  wrapper += `export const { ${namedExports.join(', ')} } = __$$;\n`
-                }
-
-                if (exportedNames.includes('default')) {
-                  wrapper += `export default __$$.default;\n`
-                } else {
+                if (!exports.includes('default')) {
+                  wrapper += `import __$$ from ${JSON.stringify('./' + name + '.cjs')};\n`
                   wrapper += `export default __$$;\n`
                 }
 
-                await fs.writeFile(wrapperfile, wrapper)
+                exports
+                  .filter((name) => name[0] == '*')
+                  .forEach((name) => {
+                    wrapper += `export * from ${JSON.stringify(name.slice(1))};\n`
+                  })
+
+                const namedExports = exports.filter((name) => name[0] != '*')
+                if (namedExports.length) {
+                  wrapper += `export { ${namedExports.join(', ')} } from ${JSON.stringify(
+                    './' + name + '.cjs',
+                  )};\n`
+                }
+
+                await fs.writeFile(path.resolve(paths.dist, name + '.mjs'), wrapper)
               }),
           )
+
           console.timeEnd('Generated Node.js esm wrappers')
-
-          // 3. transform each output file to cjs
-          await Promise.all(
-            Object.keys(result.metafile.outputs)
-              .filter((file) => file.endsWith('.cjs'))
-              .map(async (file) => {
-                const content = await fs.readFile(file, { encoding: 'utf8' })
-
-                const result = await esbuild.transform(content, {
-                  target: targets.node,
-                  format: 'cjs',
-                  charset: 'utf8',
-                  sourcefile: file,
-                  sourcemap: true,
-                  sourcesContent: false,
-                })
-
-                await fs.writeFile(file, result.code + `\n//# sourceMappingURL=${file}.map`)
-
-                const oldMap = JSON.parse(await fs.readFile(file + '.map', { encoding: 'utf8' }))
-                const newMap = JSON.parse(result.map)
-
-                await fs.writeFile(file + '.map', JSON.stringify(merge(oldMap, newMap), null, 2))
-              }),
-          )
-          console.timeEnd('Generated Node.js cjs bundles')
         },
         async () => {
-          // Build global bundles
-          if (manifest.browser !== false) {
-            console.time('Generated browser global bundles')
-            // TODO until https://github.com/evanw/esbuild/issues/1764
-            await Promise.all(
-              entryPoints
-                .filter(({ conditions }) => conditions.default || conditions.browser)
-                .map(({ outputFile, conditions }) => {
-                  const inputFile = conditions.browser || conditions.default
-                  return esbuild.build({
-                    entryPoints: { [outputFile]: inputFile },
+          console.time('Generated browser global bundles')
 
-                    outdir: paths.dist,
-                    outbase: '.',
-                    bundle: true,
-                    // splitting: true,
-                    entryNames: `[dir]/[name].global`,
-                    platform: 'browser',
-                    target: targets.script,
-                    format: 'iife',
-                    globalName:
-                      mainEntryPoint == outputFile
-                        ? globalName
-                        : camelize(globalName + '-' + outputFile),
-                    minify: true,
-                    define: {
-                      'process.browser': true,
-                      'process.env.NODE_ENV': `"production"`,
-                    },
+          await Promise.all(
+            entryPoints
+              .filter(({ conditions }) => conditions.browser || conditions.default)
+              .map(async ({ outputFile, conditions }) => {
+                const inputFile = conditions.browser || conditions.default
 
-                    metafile: true,
-                    charset: 'utf8',
-                    resolveExtensions,
-                    external: external.filter(
-                      (dependency) => !bundledDependencies.includes(dependency),
-                    ),
-                    mainFields: [
-                      'esnext',
-                      'esmodules',
-                      'modern',
-                      'es2015',
-                      'module',
-                      'jsnext:main',
-                      'main',
-                    ],
-                    conditions: [
-                      'production',
-                      'esnext',
-                      'modern',
-                      'esmodules',
-                      'es2015',
-                      'module',
-                      'import',
-                      'default',
-                      'require',
-                    ],
-                    sourcemap: true,
-                    sourcesContent: false,
-                    tsconfig: paths.tsconfig,
-                    plugins: [
-                      {
-                        name: 'distilt:global-name',
-                        setup(build) {
-                          build.onResolve(
-                            {
-                              filter: /^[^.]/,
-                              namespace: 'file',
-                            },
-                            async ({ path }) => {
-                              if (external.includes(path) && !bundledDependencies.includes(path)) {
-                                return { path: camelize(path), external: true }
-                              }
-                            },
-                          )
-                        },
+                const bundle = await rollup({
+                  input: inputFile,
+                  external: external.filter(
+                    (dependency) => !bundledDependencies.includes(dependency),
+                  ),
+                  preserveEntrySignatures: 'strict',
+                  treeshake: {
+                    propertyReadSideEffects: false,
+                  },
+                  onwarn(warning, warn) {
+                    if (warning.code === 'CIRCULAR_DEPENDENCY') return
+
+                    // Use default for everything else
+                    warn(warning)
+                  },
+                  plugins: [
+                    nodeResolve({
+                      browser: true,
+                      extensions: resolveExtensions,
+                      mainFields: [
+                        'esnext',
+                        'esmodules',
+                        'modern',
+                        'es2015',
+                        'module',
+                        'browser',
+                        'jsnext:main',
+                        'main',
+                      ],
+                      exportConditions: [
+                        'production',
+                        'esnext',
+                        'modern',
+                        'esmodules',
+                        'es2015',
+                        'module',
+                        'import',
+                        'default',
+                        'require',
+                        'browser',
+                      ],
+                    }),
+                    esbuild({
+                      exclude: null,
+                      // platform: 'neutral',
+                      target: targets.script,
+                      tsconfig: paths.tsconfig,
+                      // TODO optimizeDeps: ['vue', 'vue-router'],
+                      define: {
+                        'process.browser': true,
+                        'process.env.NODE_ENV': `"production"`,
                       },
-                    ],
-                  })
-                }),
-            )
-            console.timeEnd('Generated browser global bundles')
-          }
+                      // TODO maybe configurable
+                      loaders: {
+                        // Add .json files support
+                        // require @rollup/plugin-commonjs
+                        '.json': 'json',
+                        // Enable JSX in .js files too
+                        '.js': 'jsx',
+                      },
+                    }),
+                    dynamicImportVars({ warnOnError: true }),
+                  ],
+                })
+
+                await bundle.write({
+                  format: 'iife',
+                  file: path.resolve(paths.dist, `${outputFile}.global.js`),
+                  assetFileNames: '_/assets/[name]-[hash][extname]',
+                  name:
+                    mainEntryPoint == outputFile
+                      ? globalName
+                      : camelize(globalName + '-' + outputFile),
+                  // TODO configureable globals
+                  globals: (id) => {
+                    return (
+                      {
+                        lodash: '_',
+                        'lodash-es': '_',
+                        jquery: '$',
+                      }[id] || camelize(id)
+                    )
+                  },
+                  generatedCode: 'es2015',
+                  preferConst: true,
+                  hoistTransitiveImports: false,
+                  interop: 'auto',
+                  minifyInternalExports: true,
+                  sourcemap: true,
+                  sourcemapExcludeSources: true,
+                  freeze: false,
+                  esModule: false,
+                  plugins: [
+                    terser({
+                      ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
+                      warnings: true,
+                      compress: {
+                        keep_infinity: true,
+                        pure_getters: true,
+                        // Ideally we'd just get Terser to respect existing Arrow functions...
+                        // unsafe_arrows: true,
+                        passes: 10,
+                      },
+                      format: {
+                        // By default, Terser wraps function arguments in extra parens to trigger eager parsing.
+                        // Whether this is a good idea is way too specific to guess, so we optimize for size by default:
+                        wrap_func_args: false,
+                      },
+                    }),
+                  ],
+                })
+
+                await bundle.close()
+              }),
+          )
+
+          console.timeEnd('Generated browser global bundles')
         },
         async () => {
           console.time('Bundled typescript declarations')
@@ -659,6 +775,8 @@ async function main() {
       file: dtsFile,
       sourcemap: true,
       sourcemapExcludeSources: true,
+      freeze: false,
+      esModule: false,
       preferConst: true,
       exports: 'auto',
     })
@@ -732,21 +850,6 @@ function omitComments(key, value) {
   return value
 }
 
-function markBuiltinModules() {
-  return {
-    name: 'distilt:markBuiltinModules',
-    setup(build) {
-      build.onResolve({ filter: /^[^.]/ }, ({ path }) => {
-        if (builtinModules.includes(path)) {
-          return {
-            path: 'node:' + path,
-            external: true,
-          }
-        }
-      })
-    },
-  }
-}
 // Based in https://github.com/vitejs/vite/blob/414bc45693762c330efbe1f3c8c97829cc05695a/packages/vite/src/node/server/searchRoot.ts
 /**
  * Use instead of fs.existsSync(filename)

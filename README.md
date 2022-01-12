@@ -20,7 +20,7 @@ Add to your `package.json`:
 ```json
 {
   "scripts": {
-    "build": "distilt"
+    "prepublishOnly": "distilt"
   }
 }
 ```
@@ -39,11 +39,98 @@ npm publish dist
 
 ## Features
 
-- nodejs bundle (CommonJS)
+- nodejs bundle (CommonJS and ESM wrapper)
 - browser bundles (ESM and IIFE)
+- shared state between all exports
 - typescript types
 - bundled dependencies
 - size-limit
+- [dynamic-import-vars](https://github.com/rollup/plugins/tree/master/packages/dynamic-import-vars)
+
+## Input/Output
+
+```
+package.json
+
+  "exports": {
+    // platform: neutral
+    ".": "./src/index.ts",
+    "./web": {
+      // platform: browser
+      browser: "./src/web.ts",
+    },
+    "./node": {
+      // platform: node
+      "node": "./src/node.ts",
+    },
+  },
+
+-------------
+dist/package.json
+
+  "exports": {
+    ".": {
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "esnext": "./pkg.esnext.js",
+      "module": "./pkg.js",
+
+      // platform: browser
+      // bundle "./src/index.ts", "./src/web.ts"
+      "script": "./pkg.global.js",
+
+      "types": "./pkg.d.ts",
+      
+      // platform: node
+      // bundle "./src/index.ts", "./src/node.ts"
+      "node": {
+        "module": "./pkg.js",
+        "import": "./pkg.mjs",
+        "require": "./pkg.cjs"
+      },
+
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "default": "./pkg.js"
+    },
+    "./web": {
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "esnext": "./web.esnext.js",
+      "module": "./web.js",
+
+      // platform: browser
+      // bundle "./src/index.ts" and "./src/web.ts"
+      "script": "./web.global.js",
+
+      "types": "./web.d.ts",
+
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "default": "./web.js"
+    },
+    "./node": {
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "esnext": "./node.esnext.js",
+      "module": "./node.js",
+
+      "types": "./node.d.ts",
+
+      // platform: node
+      // bundle "./src/index.ts" and "./src/node.ts"
+      "node": {
+        "module": "./node.js",
+        "import": "./node.mjs",
+        "require": "./node.cjs"
+      },
+
+      // platform: neutral
+      // bundle "./src/index.ts", "./src/web.ts", "./src/node.ts"
+      "default": "./node.js"
+    },
+  },
+```
 
 ## License
 

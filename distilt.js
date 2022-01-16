@@ -10,16 +10,22 @@ import normalizeData from 'normalize-package-data'
 import { globby } from 'globby'
 
 import { rollup } from 'rollup'
-import esbuild from 'rollup-plugin-esbuild'
 import { nodeResolve } from '@rollup/plugin-node-resolve'
 import * as dynamicImportVarsNS from '@rollup/plugin-dynamic-import-vars'
+import json from '@rollup/plugin-json'
+import replace from '@rollup/plugin-replace'
 import inject from '@rollup/plugin-inject'
-import { terser } from 'rollup-plugin-terser'
+
+import * as tsPathsNS from 'rollup-plugin-tsconfig-paths'
+
 import dts from 'rollup-plugin-dts'
+
+import { transform, minify } from '@swc/core'
 
 import { execa } from 'execa'
 
 const dynamicImportVars = dynamicImportVarsNS.default?.default || dynamicImportVarsNS.default
+const tsPaths = tsPathsNS.default?.default || tsPathsNS.default
 
 main().catch((error) => {
   console.error(error)
@@ -50,9 +56,16 @@ async function main() {
   // keep dependencies as is
   const allDepdenciesManifest = JSON.parse(
     JSON.stringify({
-      dependencies: packageManifest.dependencies,
-      peerDependencies: packageManifest.peerDependencies,
-      devDependencies: packageManifest.devDependencies,
+      dependencies: { ...workspaceManifest.dependencies, ...packageManifest.dependencies },
+      devDependencies: { ...workspaceManifest.devDependencies, ...packageManifest.devDependencies },
+      peerDependencies: {
+        ...workspaceManifest.peerDependencies,
+        ...packageManifest.peerDependencies,
+      },
+      peerDependenciesMeta: {
+        ...workspaceManifest.peerDependenciesMeta,
+        ...packageManifest.peerDependenciesMeta,
+      },
     }),
   )
 
@@ -92,27 +105,62 @@ async function main() {
 
   // TODO read from manifest.engines
   const targets = {
-    // TODO node12.4 seems to be broken
     node: 'es2019',
     module: 'es2021',
     script: 'es2017',
-    esnext: 'esnext',
+    esnext: 'es2022',
   }
 
-  // Bundled dependencies are included in the the output bundle
+  // Bundled dependencies are included in the browser output bundle
   const bundledDependencies = [
     ...(manifest.bundledDependencies || []),
     ...(manifest.bundleDependencies || []),
+    '@swc/helpers',
   ]
 
   const external = Object.keys({
     ...manifest.dependencies,
     ...manifest.peerDependencies,
-    ...manifest.devDependencies,
   })
 
   // The package itself is external as well
   external.push(manifest.name)
+
+  function swc(options = {}) {
+    return {
+      name: 'swc',
+      resolveId(source, importer) {
+        if (
+          importer !== fileURLToPath(import.meta.url) &&
+          source === '@swc/helpers' &&
+          !external.includes(source)
+        ) {
+          return this.resolve(source, fileURLToPath(import.meta.url), { skeipSelf: true }).then(
+            (resolved) => {
+              return resolved && { ...resolved, external: false }
+            },
+          )
+        }
+      },
+      async transform(code, filename) {
+        return transform(code, {
+          ...options,
+          jsc: { ...options.jsc, minify: undefined },
+          minify: false,
+          filename,
+        })
+      },
+      renderChunk(code, chunk) {
+        if (options.minify) {
+          return minify(code, {
+            ...options.jsc?.minify,
+            sourceMap: true,
+            outputPath: chunk.fileName,
+          })
+        }
+      },
+    }
+  }
 
   const publishManifest = {
     ...manifest,
@@ -145,7 +193,7 @@ async function main() {
     },
     workspaces: undefined,
 
-    // Reset bundledDependencies as esbuild includes those into the bundle
+    // Reset bundledDependencies as rollup includes those into the bundle
     bundledDependencies: undefined,
     bundleDependencies: undefined,
 
@@ -331,6 +379,7 @@ async function main() {
               warn(warning)
             },
             plugins: [
+              tsPaths({ tsConfigPath: paths.tsconfig }),
               nodeResolve({
                 extensions: resolveExtensions,
                 mainFields: [
@@ -354,19 +403,38 @@ async function main() {
                   'require',
                 ],
               }),
-              esbuild({
-                exclude: null,
-                // platform: 'neutral',
-                target: targets.esnext,
-                tsconfig: paths.tsconfig,
-                // TODO optimizeDeps: ['vue', 'vue-router'],
-                // TODO maybe configurable
-                loaders: {
-                  // Add .json files support
-                  // require @rollup/plugin-commonjs
-                  '.json': 'json',
-                  // Enable JSX in .js files too
-                  '.js': 'jsx',
+              json({ preferConst: true }),
+              swc({
+                // https://swc.rs/docs/configuration/modules
+                module: {
+                  type: 'es6',
+                  strictMode: false,
+                  ignoreDynamic: true,
+                },
+                sourceMaps: true,
+                inlineSourcesContent: false,
+                jsc: {
+                  // TODO read from browserslist + env: esnext
+                  target: targets.esnext,
+                  // https://swc.rs/docs/configuration/compilation#jscparser
+                  parser: {
+                    // TODO based on input files: typescript or ecmascript
+                    syntax: 'typescript',
+                  },
+                  // https://swc.rs/docs/configuration/compilation#jsctransform
+                  transform: {
+                    react: {
+                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
+                      runtime: 'automatic',
+                      // Use Object.assign() instead of _extends
+                      useBuiltins: true,
+                    },
+                  },
+                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
+                  loose: false,
+                  externalHelpers: true,
+                  // Enabling this option will make swc preserve original class names.
+                  keepClassNames: true,
                 },
               }),
               dynamicImportVars({ warnOnError: true }),
@@ -423,6 +491,7 @@ async function main() {
               warn(warning)
             },
             plugins: [
+              tsPaths({ tsConfigPath: paths.tsconfig }),
               nodeResolve({
                 extensions: resolveExtensions,
                 mainFields: [
@@ -446,19 +515,39 @@ async function main() {
                   'require',
                 ],
               }),
-              esbuild({
-                exclude: null,
-                // platform: 'neutral',
-                target: targets.module,
-                tsconfig: paths.tsconfig,
-                // TODO optimizeDeps: ['vue', 'vue-router'],
-                // TODO maybe configurable
-                loaders: {
-                  // Add .json files support
-                  // require @rollup/plugin-commonjs
-                  '.json': 'json',
-                  // Enable JSX in .js files too
-                  '.js': 'jsx',
+              json({ preferConst: true }),
+              swc({
+                // https://swc.rs/docs/configuration/modules
+                module: {
+                  type: 'es6',
+                  strictMode: false,
+                  ignoreDynamic: true,
+                },
+                sourceMaps: true,
+                inlineSourcesContent: false,
+                jsc: {
+                  // TODO read from browserslist + env: esnext
+                  target: targets.module,
+                  // https://swc.rs/docs/configuration/compilation#jscparser
+                  parser: {
+                    // TODO based on input files: typescript or ecmascript
+                    syntax: 'typescript',
+                  },
+                  // https://swc.rs/docs/configuration/compilation#jsctransform
+                  transform: {
+                    react: {
+                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
+                      runtime: 'automatic',
+                      // Use Object.assign() instead of _extends
+                      useBuiltins: true,
+                    },
+                  },
+
+                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
+                  loose: false,
+                  externalHelpers: true,
+                  // Enabling this option will make swc preserve original class names.
+                  keepClassNames: true,
                 },
               }),
               dynamicImportVars({ warnOnError: true }),
@@ -515,6 +604,7 @@ async function main() {
               warn(warning)
             },
             plugins: [
+              tsPaths({ tsConfigPath: paths.tsconfig }),
               nodeResolve({
                 extensions: [...resolveExtensions, '.node'],
                 mainFields: [
@@ -539,28 +629,63 @@ async function main() {
                   'require',
                 ],
               }),
-              esbuild({
-                exclude: null,
-                // platform: 'neutral',
-                target: targets.node,
-                tsconfig: paths.tsconfig,
-                define: {
+              json({ preferConst: true }),
+              swc({
+                // https://swc.rs/docs/configuration/modules
+                module: {
+                  type: 'es6',
+                  strictMode: false,
+                  ignoreDynamic: true,
+                },
+                sourceMaps: true,
+                inlineSourcesContent: false,
+                jsc: {
+                  // TODO read from browserslist + env: esnext
+                  target: targets.node,
+                  // https://swc.rs/docs/configuration/compilation#jscparser
+                  parser: {
+                    // TODO based on input files: typescript or ecmascript
+                    syntax: 'typescript',
+                  },
+                  // https://swc.rs/docs/configuration/compilation#jsctransform
+                  transform: {
+                    react: {
+                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
+                      runtime: 'automatic',
+                      // Use Object.assign() instead of _extends
+                      useBuiltins: true,
+                    },
+                    // TODO constModules from config? https://swc.rs/docs/configuration/compilation#jsctransformconstmodules
+                    constModules: {},
+                    // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                    optimizer: {
+                      globals: {
+                        // If you set { "window": "object" }, typeof window will be replaced with "object".
+                        typeofs: {
+                          window: 'undefined',
+                          document: 'undefined',
+                          process: 'object',
+                        },
+                      },
+                    },
+                  },
+
+                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
+                  loose: false,
+                  externalHelpers: true,
+                  // Enabling this option will make swc preserve original class names.
+                  keepClassNames: true,
+                },
+              }),
+              dynamicImportVars({ warnOnError: true }),
+              replace({
+                preventAssignment: true,
+                values: {
                   'process.browser': false,
                   'import.meta.url': '__$$shim_import_meta_url',
                   'import.meta.resolve': '__$$shim_import_meta_resolve',
                 },
-
-                // TODO optimizeDeps: ['vue', 'vue-router'],
-                // TODO maybe configurable
-                loaders: {
-                  // Add .json files support
-                  // require @rollup/plugin-commonjs
-                  '.json': 'json',
-                  // Enable JSX in .js files too
-                  '.js': 'jsx',
-                },
               }),
-              dynamicImportVars({ warnOnError: true }),
               inject({
                 __$$shim_import_meta_url: [
                   fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
@@ -588,8 +713,8 @@ async function main() {
             minifyInternalExports: true,
             sourcemap: true,
             sourcemapExcludeSources: true,
-            freeze: false,
-            esModule: false,
+            freeze: true,
+            esModule: true,
           })
 
           await bundle.close()
@@ -653,15 +778,19 @@ async function main() {
                   propertyReadSideEffects: false,
                 },
                 onwarn(warning, warn) {
-                  // Not checking for unresolved import here — they should all be there
                   if (warning.code === 'CIRCULAR_DEPENDENCY') {
                     return
+                  }
+
+                  if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
+                    throw new Error(warning.message)
                   }
 
                   // Use default for everything else
                   warn(warning)
                 },
                 plugins: [
+                  tsPaths({ tsConfigPath: paths.tsconfig }),
                   nodeResolve({
                     browser: true,
                     extensions: resolveExtensions,
@@ -688,23 +817,68 @@ async function main() {
                       'browser',
                     ],
                   }),
-                  esbuild({
-                    exclude: null,
-                    // platform: 'neutral',
-                    target: targets.script,
-                    tsconfig: paths.tsconfig,
-                    // TODO optimizeDeps: ['vue', 'vue-router'],
-                    define: {
+                  json({ preferConst: true }),
+                  swc({
+                    // https://swc.rs/docs/configuration/modules
+                    module: {
+                      type: 'es6',
+                      strictMode: false,
+                      ignoreDynamic: true,
+                    },
+                    sourceMaps: true,
+                    inlineSourcesContent: false,
+                    jsc: {
+                      // TODO read from browserslist + env: esnext
+                      target: targets.script,
+                      // https://swc.rs/docs/configuration/compilation#jscparser
+                      parser: {
+                        // TODO based on input files: typescript or ecmascript
+                        syntax: 'typescript',
+                      },
+                      // https://swc.rs/docs/configuration/compilation#jsctransform
+                      transform: {
+                        react: {
+                          // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
+                          runtime: 'automatic',
+                          // Use Object.assign() instead of _extends
+                          useBuiltins: true,
+                        },
+                        // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                        optimizer: {
+                          globals: {
+                            // If you set { "window": "object" }, typeof window will be replaced with "object".
+                            typeofs: {
+                              window: 'object',
+                              document: 'object',
+                              process: 'undefined',
+                            },
+                          },
+                        },
+                      },
+
+                      // https://2ality.com/2015/12/babel6-loose-mode.html
+                      loose: true,
+                      externalHelpers: true,
+                      keepClassNames: false,
+
+                      // https://swc.rs/docs/configuration/minification
+                      minify: {
+                        compress: {
+                          ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
+                          keep_infinity: true,
+                          pure_getters: true,
+                        },
+                        mangle: true,
+                      },
+                    },
+
+                    minify: true,
+                  }),
+                  replace({
+                    preventAssignment: true,
+                    values: {
                       'process.browser': true,
                       'process.env.NODE_ENV': `"production"`,
-                    },
-                    // TODO maybe configurable
-                    loaders: {
-                      // Add .json files support
-                      // require @rollup/plugin-commonjs
-                      '.json': 'json',
-                      // Enable JSX in .js files too
-                      '.js': 'jsx',
                     },
                   }),
                   dynamicImportVars({ warnOnError: true }),
@@ -730,7 +904,7 @@ async function main() {
                   )
                 },
                 generatedCode: 'es2015',
-                preferConst: true,
+                preferConst: false,
                 hoistTransitiveImports: false,
                 interop: 'auto',
                 minifyInternalExports: true,
@@ -738,24 +912,6 @@ async function main() {
                 sourcemapExcludeSources: true,
                 freeze: false,
                 esModule: false,
-                plugins: [
-                  terser({
-                    ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
-                    warnings: true,
-                    compress: {
-                      keep_infinity: true,
-                      pure_getters: true,
-                      // Ideally we'd just get Terser to respect existing Arrow functions...
-                      // unsafe_arrows: true,
-                      passes: 10,
-                    },
-                    format: {
-                      // By default, Terser wraps function arguments in extra parens to trigger eager parsing.
-                      // Whether this is a good idea is way too specific to guess, so we optimize for size by default:
-                      wrap_func_args: false,
-                    },
-                  }),
-                ],
               })
 
               await bundle.close()

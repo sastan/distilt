@@ -20,7 +20,8 @@ Add to your `package.json`:
 ```json
 {
   "scripts": {
-    "prepublishOnly": "distilt"
+    "build": "distilt"
+    "prepublishOnly": "npm run build"
   }
 }
 ```
@@ -46,6 +47,7 @@ npm publish dist
 - bundled dependencies
 - size-limit
 - [dynamic-import-vars](https://github.com/rollup/plugins/tree/master/packages/dynamic-import-vars)
+- `@swc/helper` are inlined (only once) if not defined as a `dependency``
 
 ## Input/Output
 

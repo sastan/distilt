@@ -1,6 +1,6 @@
 # distilt
 
-> bundle a project for node and browser using esbuild
+> bundle a project for node and browser using swc and rollup
 
 [![MIT License](https://badgen.net/github/license/sastan/distilt)](https://github.com/sastan/distilt/blob/main/LICENSE)
 [![Latest Release](https://flat.badgen.net/npm/v/distilt?icon=npm&label)](https://www.npmjs.com/package/distilt)

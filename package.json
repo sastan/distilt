@@ -3,8 +3,9 @@
   "version": "0.14.0",
   "description": "generate publishable bundles",
   "keywords": [
-    "esbuild",
-    "bundle"
+    "bundle",
+    "rollup",
+    "swc"
   ],
   "homepage": "https://github.com/sastan/distilt#readme",
   "bugs": "https://github.com/sastan/distilt/issues",

@@ -139,6 +139,65 @@ dist/package.json
   },
 ```
 
+## Use-cases
+
+### Providing platform-specific shims or polyfills
+
+Suppose you're looking to provide a cross-runtime module that relies on a built-in object like [`AbortController`](https://developer.mozilla.org/en-US/docs/Web/API/AbortController). However:
+1. `AbortController` isn't ubiquitously available across LTS Node.js versions.
+2. All browsers relevant to your target audience support it natively.
+3. You do not want to penalize consumers of your module in browser use-cases with unnecessary bytes.
+
+In this case, you could leverage export maps to use a special node-only entrypoint in which polyfills are used. In order to re-use code across platforms, a factory function is used to pass in any needed shims and the dependent logic is implemented in that closure.
+
+**./src/implementation.ts**:
+
+```ts
+export function createImplementation(ctl = AbortController) {
+  return myApiFunctionThatUsesAbortController(...args: any[]) {
+    // TODO
+  }
+}
+```
+
+**./src/index.ts**
+
+> This is the generic entrypoint for any platform with native `AbortController` support
+
+```ts
+import { createImplementation } from './implementation';
+
+// Uses the environment's AbortController
+export const myApiFunctionThatUsesAbortController();
+```
+
+**./src/node.ts**
+
+> This is the Node.js-specific entrypoint that relieas on the 'abort-controller' package
+
+```ts
+import { createImplementation } from './implementation';
+import { AbortController } from 'abort-controller';
+
+// Uses the environment's AbortController
+export const myApiFunctionThatUsesAbortController(AbortController);
+```
+
+**./package.json**
+
+> Here, we tell package consumers with the 'node' condition to use the Node.js-specific
+> entrypoint so that the shim is used and available across versions.
+
+```
+  "exports": {
+    // platform: neutral
+    ".": {
+      "node": "./src/node.ts",
+      "default": "./src/index.ts"
+    }
+  },
+```
+
 ## License
 
 [MIT](https://github.com/sastan/distilt/blob/main/LICENSE)

@@ -111,17 +111,25 @@ async function main() {
     esnext: 'es2022',
   }
 
-  // Bundled dependencies are included in the browser output bundle
+  // Bundled dependencies are included in every bundle
   const bundledDependencies = [
     ...(manifest.bundledDependencies || []),
     ...(manifest.bundleDependencies || []),
-    '@swc/helpers',
   ]
 
-  const external = Object.keys({
+  const dependencies = Object.keys({
     ...manifest.dependencies,
     ...manifest.peerDependencies,
   })
+
+  // all dependencies and peerDependencies are marked as external
+  // except for bundledDependencies
+  const external = dependencies.filter((dependency) => !bundledDependencies.includes(dependency))
+
+  // except when bundling `script` conditions — their only the peerDependencies are marked as external
+  const scriptExternal = Object.keys(manifest.peerDependencies).filter(
+    (dependency) => !bundledDependencies.includes(dependency),
+  )
 
   // The package itself is external as well
   external.push(manifest.name)
@@ -131,11 +139,11 @@ async function main() {
       name: 'swc',
       resolveId(source, importer) {
         if (
-          importer !== fileURLToPath(import.meta.url) &&
           source === '@swc/helpers' &&
-          !external.includes(source)
+          importer !== fileURLToPath(import.meta.url) &&
+          !dependencies.includes(source)
         ) {
-          return this.resolve(source, fileURLToPath(import.meta.url), { skeipSelf: true }).then(
+          return this.resolve(source, fileURLToPath(import.meta.url), { skipSelf: true }).then(
             (resolved) => {
               return resolved && { ...resolved, external: false }
             },
@@ -183,8 +191,6 @@ async function main() {
     source: undefined,
     scripts: undefined,
     packageManager: undefined,
-    devDependencies: undefined,
-    optionalDependencies: undefined,
     engines: manifest.engines && {
       ...manifest.engines,
       npm: undefined,
@@ -196,6 +202,7 @@ async function main() {
     // Reset bundledDependencies as rollup includes those into the bundle
     bundledDependencies: undefined,
     bundleDependencies: undefined,
+    devDependencies: undefined,
 
     // Reset config sections
     eslintConfig: undefined,
@@ -770,9 +777,7 @@ async function main() {
 
               const bundle = await rollup({
                 input: inputFile,
-                external: external.filter(
-                  (dependency) => !bundledDependencies.includes(dependency),
-                ),
+                external: scriptExternal,
                 preserveEntrySignatures: 'strict',
                 treeshake: {
                   propertyReadSideEffects: false,

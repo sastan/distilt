@@ -45,9 +45,11 @@ npm publish dist
 - shared state between all exports
 - typescript types
 - bundled dependencies
-- size-limit
+  - `bundledDependencies` are always bundled
+  - for script exports all `dependencies` are bundled except they are listed in `peerDependencies`
 - [dynamic-import-vars](https://github.com/rollup/plugins/tree/master/packages/dynamic-import-vars)
 - `@swc/helper` are inlined (only once) if not defined as a `dependency``
+- size-limit
 
 ## Input/Output
 

@@ -168,7 +168,7 @@ export function createImplementation(ctl = AbortController) {
 import { createImplementation } from './implementation';
 
 // Uses the environment's AbortController
-export default myApiFunctionThatUsesAbortController();
+export default createImplementation();
 ```
 
 **./src/node.ts**
@@ -180,7 +180,7 @@ import { createImplementation } from './implementation';
 import { AbortController } from 'abort-controller';
 
 // Uses AbortController shim
-export default myApiFunctionThatUsesAbortController(AbortController);
+export default createImplementation(AbortController);
 ```
 
 **./package.json**

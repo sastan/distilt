@@ -49,6 +49,9 @@ npm publish dist
   - for script exports all `dependencies` are bundled except they are listed in `peerDependencies`
 - [dynamic-import-vars](https://github.com/rollup/plugins/tree/master/packages/dynamic-import-vars)
 - `@swc/helper` are inlined (only once) if not defined as a `dependency``
+- customize [global name](https://rollupjs.org/guide/en/#outputname) for `script` exports
+  1. doc-block comment in entry file: `/* @distilt-global-name useThisGlobalName */`
+  2. `globalName` or `name` from `package.json` appended with current entry point name
 - size-limit
 
 ## Input/Output
@@ -84,7 +87,7 @@ dist/package.json
       "script": "./pkg.global.js",
 
       "types": "./pkg.d.ts",
-      
+
       // platform: node
       // bundle "./src/index.ts", "./src/node.ts"
       "node": {

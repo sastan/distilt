@@ -8,6 +8,7 @@ import { fileURLToPath } from 'url'
 import { findUpSync } from 'find-up'
 import normalizeData from 'normalize-package-data'
 import { globby } from 'globby'
+import { makeLegalIdentifier } from '@rollup/pluginutils'
 
 import { rollup } from 'rollup'
 import { nodeResolve } from '@rollup/plugin-node-resolve'
@@ -18,10 +19,9 @@ import inject from '@rollup/plugin-inject'
 
 import * as tsPathsNS from 'rollup-plugin-tsconfig-paths'
 
-import dts from 'rollup-plugin-dts'
-
 import { transform, minify } from '@swc/core'
 
+import dts from 'rollup-plugin-dts'
 import { execa } from 'execa'
 
 const dynamicImportVars = dynamicImportVarsNS.default?.default || dynamicImportVarsNS.default
@@ -101,7 +101,7 @@ async function main() {
 
   const resolveExtensions = ['.tsx', '.ts', '.jsx', '.mjs', '.js', '.cjs', '.css', '.json']
 
-  const globalName = camelize(manifest.name)
+  const globalName = manifest.globalName || manifest.amdName || makeGlobalName(manifest.name)
 
   // TODO read from manifest.engines
   const targets = {
@@ -890,14 +890,21 @@ async function main() {
                 ],
               })
 
+              const content = await fs.readFile(inputFile, { encoding: 'utf-8' })
+
+              const name =
+                content.match(/\/\*\s*@distilt-global-name\s+(\S+)\s*\*\//)?.[1] ||
+                (mainEntryPoint == outputFile
+                  ? globalName
+                  : makeGlobalName(globalName + '/' + outputFile))
+
               await bundle.write({
                 format: 'iife',
                 file: path.resolve(paths.dist, `${outputFile}.global.js`),
                 assetFileNames: '_/assets/[name]-[hash][extname]',
-                name:
-                  mainEntryPoint == outputFile
-                    ? globalName
-                    : camelize(globalName + '-' + outputFile),
+                name,
+                compact: true,
+                inlineDynamicImports: true,
                 // TODO configureable globals
                 globals: (id) => {
                   return (
@@ -905,7 +912,7 @@ async function main() {
                       lodash: '_',
                       'lodash-es': '_',
                       jquery: '$',
-                    }[id] || camelize(id)
+                    }[id] || makeGlobalName(id)
                   )
                 },
                 generatedCode: 'es2015',
@@ -1031,8 +1038,8 @@ async function main() {
   }
 }
 
-function camelize(str) {
-  return str.replace(/[^a-z\d]+([a-z\d])/gi, (_, $1) => $1.toUpperCase())
+function makeGlobalName(name) {
+  return makeLegalIdentifier(name).replace(/^_(?=.)/, '')
 }
 
 function omitComments(key, value) {

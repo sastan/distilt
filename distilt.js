@@ -369,7 +369,7 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external,
+            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -481,7 +481,7 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external,
+            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -594,7 +594,7 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external,
+            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -669,6 +669,7 @@ async function main() {
                       globals: {
                         // If you set { "window": "object" }, typeof window will be replaced with "object".
                         typeofs: {
+                          self: 'undefined',
                           window: 'undefined',
                           document: 'undefined',
                           process: 'object',
@@ -777,7 +778,7 @@ async function main() {
 
               const bundle = await rollup({
                 input: inputFile,
-                external: scriptExternal,
+                external: (source) => scriptExternal.includes(source) || scriptExternal.some(external => source.startsWith(external + '/')),
                 preserveEntrySignatures: 'strict',
                 treeshake: {
                   propertyReadSideEffects: false,
@@ -853,6 +854,7 @@ async function main() {
                           globals: {
                             // If you set { "window": "object" }, typeof window will be replaced with "object".
                             typeofs: {
+                              self: 'object',
                               window: 'object',
                               document: 'object',
                               process: 'undefined',

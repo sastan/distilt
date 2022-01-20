@@ -968,7 +968,7 @@ async function main() {
     // => '.types/shim/index.ts'
     // => '.types/index.ts'
 
-    const parts = inputFile.replace(/\.(ts|tsx)$/, '.d.ts').split('/')
+    const parts = inputFile.replace(/\.(ts|tsx)$/, '.d.ts').split(path.sep)
     let sourceDtsFile = path.resolve(typesDirectory, parts.join('/'))
 
     for (let offset = 0; offset < parts.length && !existsSync(sourceDtsFile); offset++) {

@@ -369,7 +369,9 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
+            external: (source) =>
+              external.includes(source) ||
+              external.some((external) => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -481,7 +483,9 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
+            external: (source) =>
+              external.includes(source) ||
+              external.some((external) => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -594,7 +598,9 @@ async function main() {
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
-            external: (source) => external.includes(source) || external.some(external => source.startsWith(external + '/')),
+            external: (source) =>
+              external.includes(source) ||
+              external.some((external) => source.startsWith(external + '/')),
             preserveEntrySignatures: 'strict',
             treeshake: {
               propertyReadSideEffects: false,
@@ -778,7 +784,9 @@ async function main() {
 
               const bundle = await rollup({
                 input: inputFile,
-                external: (source) => scriptExternal.includes(source) || scriptExternal.some(external => source.startsWith(external + '/')),
+                external: (source) =>
+                  scriptExternal.includes(source) ||
+                  scriptExternal.some((external) => source.startsWith(external + '/')),
                 preserveEntrySignatures: 'strict',
                 treeshake: {
                   propertyReadSideEffects: false,
@@ -898,7 +906,7 @@ async function main() {
                 content.match(/\/\*\s*@distilt-global-name\s+(\S+)\s*\*\//)?.[1] ||
                 (mainEntryPoint == outputFile
                   ? globalName
-                  : makeGlobalName(globalName + '/' + outputFile))
+                  : globalName + '_' + makeGlobalName(outputFile))
 
               await bundle.write({
                 format: 'iife',
@@ -1041,7 +1049,16 @@ async function main() {
 }
 
 function makeGlobalName(name) {
-  return makeLegalIdentifier(name).replace(/^_(?=.)/, '')
+  // package -> package
+  // package/export -> package_export
+  // @scope/package -> scope.package
+  // @scope/package/export -> scope.package_export
+  return name.replace(/^(?:@([^/]+)\/)?(.+)/, (_, scope, name) => {
+    return (
+      (scope ? makeLegalIdentifier(scope).replace(/^_(?=.)/, '') + '.' : '') +
+      makeLegalIdentifier(name).replace(/^_(?=.)/, '')
+    )
+  })
 }
 
 function omitComments(key, value) {

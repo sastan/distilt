@@ -231,7 +231,7 @@ async function main() {
     typesDirectory && (fs.rm || fs.rmdir)(typesDirectory, { force: true, recursive: true })
   }
 
-  if (manifest['size-limit']) {
+  if (packageManifest['size-limit']) {
     const { default: run } = await import('size-limit/run.js')
 
     await run(process)

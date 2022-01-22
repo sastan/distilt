@@ -202,9 +202,12 @@ async function main() {
     // Reset bundledDependencies as rollup includes those into the bundle
     bundledDependencies: undefined,
     bundleDependencies: undefined,
+
+    // not needed for published packages
     devDependencies: undefined,
 
     // Reset config sections
+    pnpm: undefined,
     eslintConfig: undefined,
     prettier: undefined,
     np: undefined,

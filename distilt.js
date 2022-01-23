@@ -170,16 +170,32 @@ async function main() {
     }
   }
 
+  // 'commonjs' or 'module'
+  const type = manifest.type || 'module'
+  const esmExt = type == 'module' ? '.js' : '.mjs'
+  const cjsExt = type == 'commonjs' ? '.js' : '.cjs'
+
   const publishManifest = {
     ...manifest,
-    type: 'module',
 
-    exports: {
-      '.': manifest.source || manifest.main,
-      // Allow access to package.json
-      './package.json': './package.json',
-      ...manifest.exports,
-    },
+    type,
+
+    exports: manifest.exports
+      ? {
+          ...manifest.exports,
+          // Allow access to package.json
+          './package.json': './package.json',
+        }
+      : manifest.source || manifest.main
+      ? {
+          '.': manifest.source || manifest.main,
+          // Allow access to package.json
+          './package.json': './package.json',
+        }
+      : {
+          // Allow access to package.json
+          './package.json': './package.json',
+        },
 
     // Allow publish
     private: undefined,
@@ -309,12 +325,12 @@ async function main() {
         // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
         publishManifest.exports[entryPoint] = {
           // used by bundlers — compatible with current Spec and stage 4 proposals
-          esnext: outputFile + '.esnext.js',
+          esnext: `${outputFile}.esnext.js`,
           // used by bundlers
-          module: outputFile + '.js',
+          module: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
 
           // for direct script usage
-          script: (conditions.default || conditions.browser) && outputFile + '.global.js',
+          script: (conditions.default || conditions.browser) && `${outputFile}.global.js`,
 
           // typescript
           types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
@@ -322,12 +338,12 @@ async function main() {
           // Node.js
           node: (conditions.default || conditions.node) && {
             // nodejs esm wrapper
-            import: outputFile + '.mjs',
-            require: outputFile + '.cjs',
+            import: `${outputFile}.mjs`,
+            require: `${outputFile}${cjsExt}`,
           },
 
           // fallback to esm
-          default: outputFile + '.js',
+          default: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
         }
 
         return {
@@ -456,8 +472,8 @@ async function main() {
           await bundle.write({
             format: 'es',
             dir: paths.dist,
-            entryFileNames: '[name].esnext.js',
-            chunkFileNames: '_/[name]-[hash].js',
+            entryFileNames: `[name].esnext.js`,
+            chunkFileNames: `_/[name]-[hash].js`,
             assetFileNames: '_/assets/[name]-[hash][extname]',
             generatedCode: 'es2015',
             preferConst: true,
@@ -571,8 +587,8 @@ async function main() {
           await bundle.write({
             format: 'es',
             dir: paths.dist,
-            entryFileNames: '[name].js',
-            chunkFileNames: '_/[name]-[hash].js',
+            entryFileNames: `[name]${type === 'commonjs' ? '.esm' : ''}.js`,
+            chunkFileNames: `_/[name]-[hash]${type === 'commonjs' ? '.esm' : ''}.js`,
             assetFileNames: '_/assets/[name]-[hash][extname]',
             generatedCode: 'es2015',
             preferConst: true,
@@ -720,8 +736,8 @@ async function main() {
             format: 'cjs',
             exports: 'auto',
             dir: paths.dist,
-            entryFileNames: '[name].cjs',
-            chunkFileNames: '_/[name]-[hash].cjs',
+            entryFileNames: `[name]${cjsExt}`,
+            chunkFileNames: `_/[name]-[hash]${cjsExt}`,
             assetFileNames: '_/assets/[name]-[hash][extname]',
             generatedCode: 'es2015',
             preferConst: true,
@@ -749,7 +765,7 @@ async function main() {
                 let wrapper = ''
 
                 if (!exports.includes('default')) {
-                  wrapper += `import __$$ from ${JSON.stringify('./' + name + '.cjs')};\n`
+                  wrapper += `import __$$ from ${JSON.stringify(`./${name}${cjsExt}`)};\n`
                   wrapper += `export default __$$;\n`
                 }
 
@@ -762,7 +778,7 @@ async function main() {
                 const namedExports = exports.filter((name) => name[0] != '*')
                 if (namedExports.length) {
                   wrapper += `export { ${namedExports.join(', ')} } from ${JSON.stringify(
-                    './' + name + '.cjs',
+                    `./${name}${cjsExt}`,
                   )};\n`
                 }
 

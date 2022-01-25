@@ -250,13 +250,9 @@ async function main() {
   }
 
   if (packageManifest['size-limit']) {
-    try {
-      const { default: run } = await import('size-limit/run.js')
+    const { default: run } = await import('size-limit/run.js')
 
-      await run(process)
-    } catch(error) {
-      console.warn('size-limit failed', error)
-    }
+    await run(process)
   }
 
   async function prepare() {
@@ -328,22 +324,29 @@ async function main() {
         // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
         publishManifest.exports[entryPoint] = {
           // used by bundlers — compatible with current Spec and stage 4 proposals
-          esnext: `${outputFile}.esnext.js`,
+          esnext: conditions.esnext === null ? undefined : `${outputFile}.esnext.js`,
           // used by bundlers
           module: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
 
           // for direct script usage
-          script: (conditions.default || conditions.browser) && `${outputFile}.global.js`,
+          script:
+            conditions.script === null
+              ? undefined
+              : (conditions.script || conditions.browser || conditions.default) &&
+                `${outputFile}.global.js`,
 
           // typescript
           types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
 
           // Node.js
-          node: (conditions.default || conditions.node) && {
-            // nodejs esm wrapper
-            import: `${outputFile}.mjs`,
-            require: `${outputFile}${cjsExt}`,
-          },
+          node:
+            conditions.node === null
+              ? undefined
+              : (conditions.node || conditions.default) && {
+                  // nodejs esm wrapper
+                  import: `${outputFile}.mjs`,
+                  require: `${outputFile}${cjsExt}`,
+                },
 
           // fallback to esm
           default: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
@@ -380,10 +383,12 @@ async function main() {
     await Promise.all(
       [
         async () => {
-          const inputs = entryPoints.map(({ outputFile, conditions }) => [
-            outputFile,
-            conditions.default || conditions.browser || conditions.node,
-          ])
+          const inputs = entryPoints
+            .filter(({ conditions }) => conditions.esnext !== null)
+            .map(({ outputFile, conditions }) => [
+              outputFile,
+              conditions.default || conditions.browser || conditions.node,
+            ])
 
           if (!inputs.length) return
 
@@ -609,10 +614,12 @@ async function main() {
           console.timeEnd('Generated module bundles')
         },
         async () => {
-          const inputs = entryPoints.map(({ outputFile, conditions }) => [
-            outputFile,
-            conditions.node || conditions.default,
-          ])
+          const inputs = entryPoints
+            .filter(({ conditions }) => conditions.node !== null)
+            .map(({ outputFile, conditions }) => [
+              outputFile,
+              conditions.node || conditions.default,
+            ])
 
           if (!inputs.length) return
 
@@ -793,7 +800,9 @@ async function main() {
         },
         async () => {
           const inputs = entryPoints.filter(
-            ({ conditions }) => conditions.browser || conditions.default,
+            ({ conditions }) =>
+              conditions.script !== null &&
+              (conditions.script || conditions.browser || conditions.default),
           )
 
           if (!inputs.length) return
@@ -802,7 +811,7 @@ async function main() {
 
           await Promise.all(
             inputs.map(async ({ outputFile, conditions }) => {
-              const inputFile = conditions.browser || conditions.default
+              const inputFile = conditions.script || conditions.browser || conditions.default
 
               const bundle = await rollup({
                 input: inputFile,

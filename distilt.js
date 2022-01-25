@@ -172,7 +172,6 @@ async function main() {
 
   // 'commonjs' or 'module'
   const type = manifest.type || 'module'
-  const esmExt = type == 'module' ? '.js' : '.mjs'
   const cjsExt = type == 'commonjs' ? '.js' : '.cjs'
 
   const publishManifest = {
@@ -251,9 +250,13 @@ async function main() {
   }
 
   if (packageManifest['size-limit']) {
-    const { default: run } = await import('size-limit/run.js')
+    try {
+      const { default: run } = await import('size-limit/run.js')
 
-    await run(process)
+      await run(process)
+    } catch(error) {
+      console.warn('size-limit failed', error)
+    }
   }
 
   async function prepare() {

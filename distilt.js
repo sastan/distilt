@@ -309,7 +309,9 @@ async function main() {
         }
 
         if (
-          !Object.values(conditions).every((inputFile) => /\.([mc]js|[jt]sx?)$/.test(inputFile))
+          !Object.values(conditions).every(
+            (inputFile) => inputFile === null || /\.([mc]js|[jt]sx?)$/.test(inputFile),
+          )
         ) {
           return
         }

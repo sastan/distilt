@@ -450,7 +450,6 @@ async function main() {
                   ignoreDynamic: true,
                 },
                 sourceMaps: true,
-                inlineSourcesContent: false,
                 jsc: {
                   // TODO read from browserslist + env: esnext
                   target: targets.esnext,
@@ -491,7 +490,6 @@ async function main() {
             interop: 'auto',
             minifyInternalExports: true,
             sourcemap: true,
-            sourcemapExcludeSources: true,
             freeze: false,
             esModule: false,
           })
@@ -564,7 +562,6 @@ async function main() {
                   ignoreDynamic: true,
                 },
                 sourceMaps: true,
-                inlineSourcesContent: false,
                 jsc: {
                   // TODO read from browserslist + env: esnext
                   target: targets.module,
@@ -606,7 +603,6 @@ async function main() {
             interop: 'auto',
             minifyInternalExports: true,
             sourcemap: true,
-            sourcemapExcludeSources: true,
             freeze: false,
             esModule: false,
           })
@@ -682,7 +678,6 @@ async function main() {
                   ignoreDynamic: true,
                 },
                 sourceMaps: true,
-                inlineSourcesContent: false,
                 jsc: {
                   // TODO read from browserslist + env: esnext
                   target: targets.node,
@@ -757,7 +752,6 @@ async function main() {
             interop: 'auto',
             minifyInternalExports: true,
             sourcemap: true,
-            sourcemapExcludeSources: true,
             freeze: true,
             esModule: true,
           })
@@ -873,7 +867,6 @@ async function main() {
                       ignoreDynamic: true,
                     },
                     sourceMaps: true,
-                    inlineSourcesContent: false,
                     jsc: {
                       // TODO read from browserslist + env: esnext
                       target: targets.script,
@@ -964,7 +957,6 @@ async function main() {
                 interop: 'auto',
                 minifyInternalExports: true,
                 sourcemap: true,
-                sourcemapExcludeSources: true,
                 freeze: false,
                 esModule: false,
               })
@@ -1017,7 +1009,6 @@ async function main() {
       format: 'esm',
       file: dtsFile,
       sourcemap: true,
-      sourcemapExcludeSources: true,
       freeze: false,
       esModule: false,
       preferConst: true,

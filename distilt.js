@@ -325,6 +325,9 @@ async function main() {
         // Define package loading
         // https://gist.github.com/sokra/e032a0f17c1721c71cfced6f14516c62
         publishManifest.exports[entryPoint] = {
+          // typescript
+          types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
+
           // used by bundlers — compatible with current Spec and stage 4 proposals
           esnext: conditions.esnext === null ? undefined : `${outputFile}.esnext.js`,
           // used by bundlers
@@ -336,9 +339,6 @@ async function main() {
               ? undefined
               : (conditions.script || conditions.browser || conditions.default) &&
                 `${outputFile}.global.js`,
-
-          // typescript
-          types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
 
           // Node.js
           node:

@@ -415,7 +415,7 @@ async function main() {
 
           // for direct script usage
           script:
-            targets.esnext && conditions.script !== null
+            targets.script && conditions.script !== null
               ? (conditions.script || conditions.browser || conditions.default) &&
                 `${outputFile}.global.js`
               : undefined,

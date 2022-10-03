@@ -144,6 +144,7 @@ dist/package.json
 ### Providing platform-specific shims or polyfills
 
 Suppose you're looking to provide a cross-runtime module that relies on a built-in object like [`AbortController`](https://developer.mozilla.org/en-US/docs/Web/API/AbortController). However:
+
 1. `AbortController` isn't ubiquitously available across LTS Node.js versions.
 2. All browsers relevant to your target audience support it natively.
 3. You do not want to penalize consumers of your module in browser use-cases with unnecessary bytes.
@@ -165,10 +166,10 @@ export function createImplementation(ctl = AbortController) {
 > This is the generic entrypoint for any platform with native `AbortController` support
 
 ```ts
-import { createImplementation } from './implementation';
+import { createImplementation } from './implementation'
 
 // Uses the environment's AbortController
-export default createImplementation();
+export default createImplementation()
 ```
 
 **./src/node.ts**
@@ -176,11 +177,11 @@ export default createImplementation();
 > This is the Node.js-specific entrypoint that relieas on the 'abort-controller' package
 
 ```ts
-import { createImplementation } from './implementation';
-import { AbortController } from 'abort-controller';
+import { createImplementation } from './implementation'
+import { AbortController } from 'abort-controller'
 
 // Uses AbortController shim
-export default createImplementation(AbortController);
+export default createImplementation(AbortController)
 ```
 
 **./package.json**

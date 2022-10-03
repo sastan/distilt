@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { existsSync, accessSync, readFileSync } from 'fs'
-import fs from 'fs/promises'
-import path from 'path'
-import { fileURLToPath } from 'url'
+import { existsSync, accessSync, readFileSync } from 'node:fs'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { findUpSync } from 'find-up'
 import normalizeData from 'normalize-package-data'
@@ -23,6 +23,8 @@ import { transform, minify } from '@swc/core'
 
 import dts from 'rollup-plugin-dts'
 import { execa } from 'execa'
+
+import semver from 'semver'
 
 const dynamicImportVars = dynamicImportVarsNS.default?.default || dynamicImportVarsNS.default
 const tsPaths = tsPathsNS.default?.default || tsPathsNS.default
@@ -103,12 +105,29 @@ async function main() {
 
   const globalName = manifest.globalName || manifest.amdName || makeGlobalName(manifest.name)
 
-  // TODO read from manifest.engines
   const targets = {
-    node: 'es2019',
-    module: 'es2021',
-    script: 'es2017',
-    esnext: 'es2022',
+    node:
+      manifest.distilt?.targets?.node ??
+      (await (async (nodeTarget = '14.x') => {
+        const minNodeVersion = semver.minVersion(nodeTarget)
+
+        for (const [esversion, nodeRange] of [
+          // ['es2023', '>=18.0.0'], // TODO: not yet supported by swc
+          ['es2022', '>=16.11.0'],
+          ['es2021', '>=15.0.0'],
+          ['es2020', '>=14.0.0'],
+          ['es2019', '>=12.0.0'],
+        ]) {
+          if (semver.satisfies(minNodeVersion, nodeRange)) {
+            return esversion
+          }
+        }
+
+        return 'es2018' // >=10.0.0
+      })(manifest.engines?.node)),
+    module: manifest.distilt?.targets?.module ?? 'es2021',
+    script: manifest.distilt?.targets?.script ?? 'es2017',
+    esnext: manifest.distilt?.targets?.esnext ?? 'es2022',
   }
 
   // Bundled dependencies are included in every bundle
@@ -139,9 +158,9 @@ async function main() {
       name: 'swc',
       resolveId(source, importer) {
         if (
-          source === '@swc/helpers' &&
+          (source === '@swc/helpers' || source.startsWith('@swc/helpers/')) &&
           importer !== fileURLToPath(import.meta.url) &&
-          !dependencies.includes(source)
+          !dependencies.includes('@swc/helpers')
         ) {
           return this.resolve(source, fileURLToPath(import.meta.url), { skipSelf: true }).then(
             (resolved) => {
@@ -152,8 +171,57 @@ async function main() {
       },
       async transform(code, filename) {
         return transform(code, {
+          sourceMaps: true,
           ...options,
-          jsc: { ...options.jsc, minify: undefined },
+          // https://swc.rs/docs/configuration/modules
+          module: {
+            type: 'es6',
+            strictMode: false,
+            ignoreDynamic: true,
+            ...options.module,
+          },
+          jsc: {
+            // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
+            loose: false,
+            externalHelpers: true,
+            // Enabling this option will make swc preserve original class names.
+            keepClassNames: true,
+
+            ...options.jsc,
+
+            // https://swc.rs/docs/configuration/compilation#jscparser
+            parser: {
+              // TODO based on input files: typescript or ecmascript
+              syntax: 'typescript',
+              ...options.jsc.parser,
+            },
+
+            // https://swc.rs/docs/configuration/compilation#jsctransform
+            transform: {
+              ...options.jsc.transform,
+
+              // TODO constModules from config? https://swc.rs/docs/configuration/compilation#jsctransformconstmodules
+              // constModules: {},
+
+              react: {
+                // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
+                runtime: 'automatic',
+                // Use Object.assign() instead of _extends
+                useBuiltins: true,
+                ...options.jsc.transform?.react,
+              },
+            },
+
+            experimental: {
+              keepImportAssertions: true,
+              ...options.jsc.experimental,
+            },
+
+            preserveAllComments: true,
+            minify: undefined,
+          },
+
+          sourceMaps: true,
           minify: false,
           filename,
         })
@@ -172,7 +240,7 @@ async function main() {
 
   // 'commonjs' or 'module'
   const type = manifest.type || 'module'
-  const cjsExt = type == 'commonjs' ? '.js' : '.cjs'
+  const cjsExt = type === 'commonjs' ? '.js' : '.cjs'
 
   const publishManifest = {
     ...manifest,
@@ -202,6 +270,13 @@ async function main() {
     // Include all files in the dist folder
     files: undefined,
 
+    // Clean up publish config
+    publishConfig: {
+      ...manifest.publishConfig,
+      // Remove directory as it is no longer needed
+      directory: undefined,
+    },
+
     // These are not needed any more
     source: undefined,
     scripts: undefined,
@@ -222,6 +297,7 @@ async function main() {
     devDependencies: undefined,
 
     // Reset config sections
+    distilt: undefined,
     pnpm: undefined,
     eslintConfig: undefined,
     prettier: undefined,
@@ -299,7 +375,7 @@ async function main() {
 
     const entryPoints = Object.entries(publishManifest.exports)
       .map(([entryPoint, conditions]) => {
-        if (typeof conditions == 'string') {
+        if (typeof conditions === 'string') {
           conditions = { default: conditions }
         }
 
@@ -316,9 +392,9 @@ async function main() {
           return
         }
 
-        const outputFile = entryPoint == '.' ? './' + manifest.name.split('/').pop() : entryPoint
+        const outputFile = entryPoint === '.' ? './' + manifest.name.split('/').pop() : entryPoint
 
-        if (entryPoint == '.') {
+        if (entryPoint === '.') {
           mainEntryPoint = outputFile.slice(2)
         }
 
@@ -329,30 +405,39 @@ async function main() {
           types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
 
           // used by bundlers — compatible with current Spec and stage 4 proposals
-          esnext: conditions.esnext === null ? undefined : `${outputFile}.esnext.js`,
+          esnext:
+            targets.esnext && conditions.esnext !== null ? `${outputFile}.esnext.js` : undefined,
+
           // used by bundlers
-          module: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
+          module: targets.module
+            ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
+            : undefined,
 
           // for direct script usage
           script:
-            conditions.script === null
-              ? undefined
-              : (conditions.script || conditions.browser || conditions.default) &&
-                `${outputFile}.global.js`,
+            targets.esnext && conditions.script !== null
+              ? (conditions.script || conditions.browser || conditions.default) &&
+                `${outputFile}.global.js`
+              : undefined,
 
           // Node.js
           node:
-            conditions.node === null
-              ? undefined
-              : (conditions.node || conditions.default) && {
+            targets.node && conditions.node !== null
+              ? (conditions.node || conditions.default) && {
                   // nodejs esm wrapper
                   import: `${outputFile}.mjs`,
                   require: `${outputFile}${cjsExt}`,
-                },
+                }
+              : undefined,
 
-          // fallback to esm
-          default: `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`,
+          default: undefined,
         }
+
+        publishManifest.exports[entryPoint].default =
+          publishManifest.exports[entryPoint].default ||
+          publishManifest.exports[entryPoint].node ||
+          publishManifest.exports[entryPoint].esnext ||
+          publishManifest.exports[entryPoint].script
 
         return {
           outputFile: outputFile.slice(2),
@@ -385,6 +470,8 @@ async function main() {
     await Promise.all(
       [
         async () => {
+          if (!targets.esnext) return
+
           const inputs = entryPoints
             .filter(({ conditions }) => conditions.esnext !== null)
             .map(({ outputFile, conditions }) => [
@@ -394,7 +481,7 @@ async function main() {
 
           if (!inputs.length) return
 
-          console.time('Generated esnext bundles')
+          console.time(`Generated esnext bundles (${targets.esnext})`)
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
@@ -442,38 +529,7 @@ async function main() {
                 ],
               }),
               json({ preferConst: true }),
-              swc({
-                // https://swc.rs/docs/configuration/modules
-                module: {
-                  type: 'es6',
-                  strictMode: false,
-                  ignoreDynamic: true,
-                },
-                sourceMaps: true,
-                jsc: {
-                  // TODO read from browserslist + env: esnext
-                  target: targets.esnext,
-                  // https://swc.rs/docs/configuration/compilation#jscparser
-                  parser: {
-                    // TODO based on input files: typescript or ecmascript
-                    syntax: 'typescript',
-                  },
-                  // https://swc.rs/docs/configuration/compilation#jsctransform
-                  transform: {
-                    react: {
-                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
-                      runtime: 'automatic',
-                      // Use Object.assign() instead of _extends
-                      useBuiltins: true,
-                    },
-                  },
-                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
-                  loose: false,
-                  externalHelpers: true,
-                  // Enabling this option will make swc preserve original class names.
-                  keepClassNames: true,
-                },
-              }),
+              swc({ jsc: { target: targets.esnext } }),
               dynamicImportVars({ warnOnError: true }),
             ],
           })
@@ -481,14 +537,20 @@ async function main() {
           await bundle.write({
             format: 'es',
             dir: paths.dist,
-            entryFileNames: `[name].esnext.js`,
-            chunkFileNames: `_/[name]-[hash].js`,
+            entryFileNames: '[name].esnext.js',
+            chunkFileNames: '_/[name]-[hash].js',
             assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: 'es2015',
-            preferConst: true,
+            generatedCode: {
+              preset: 'es2015',
+              arrowFunctions: true,
+              constBindings: true,
+              objectShorthand: true,
+              // prevent: [Symbol.toStringTag]: { value: 'Module' }
+              symbols: false,
+            },
             hoistTransitiveImports: false,
             interop: 'auto',
-            minifyInternalExports: true,
+            minifyInternalExports: false,
             sourcemap: true,
             freeze: false,
             esModule: false,
@@ -496,9 +558,11 @@ async function main() {
 
           await bundle.close()
 
-          console.timeEnd('Generated esnext bundles')
+          console.timeEnd(`Generated esnext bundles (${targets.esnext})`)
         },
         async () => {
+          if (!targets.module) return
+
           const inputs = entryPoints.map(({ outputFile, conditions }) => [
             outputFile,
             conditions.default || conditions.browser || conditions.node,
@@ -506,7 +570,7 @@ async function main() {
 
           if (!inputs.length) return
 
-          console.time('Generated module bundles')
+          console.time(`Generated module bundles (${targets.module})`)
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
@@ -554,39 +618,7 @@ async function main() {
                 ],
               }),
               json({ preferConst: true }),
-              swc({
-                // https://swc.rs/docs/configuration/modules
-                module: {
-                  type: 'es6',
-                  strictMode: false,
-                  ignoreDynamic: true,
-                },
-                sourceMaps: true,
-                jsc: {
-                  // TODO read from browserslist + env: esnext
-                  target: targets.module,
-                  // https://swc.rs/docs/configuration/compilation#jscparser
-                  parser: {
-                    // TODO based on input files: typescript or ecmascript
-                    syntax: 'typescript',
-                  },
-                  // https://swc.rs/docs/configuration/compilation#jsctransform
-                  transform: {
-                    react: {
-                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
-                      runtime: 'automatic',
-                      // Use Object.assign() instead of _extends
-                      useBuiltins: true,
-                    },
-                  },
-
-                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
-                  loose: false,
-                  externalHelpers: true,
-                  // Enabling this option will make swc preserve original class names.
-                  keepClassNames: true,
-                },
-              }),
+              swc({ jsc: { target: targets.module } }),
               dynamicImportVars({ warnOnError: true }),
             ],
           })
@@ -597,11 +629,17 @@ async function main() {
             entryFileNames: `[name]${type === 'commonjs' ? '.esm' : ''}.js`,
             chunkFileNames: `_/[name]-[hash]${type === 'commonjs' ? '.esm' : ''}.js`,
             assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: 'es2015',
-            preferConst: true,
+            generatedCode: {
+              preset: 'es2015',
+              arrowFunctions: true,
+              constBindings: true,
+              objectShorthand: true,
+              // prevent: [Symbol.toStringTag]: { value: 'Module' }
+              symbols: false,
+            },
             hoistTransitiveImports: false,
             interop: 'auto',
-            minifyInternalExports: true,
+            minifyInternalExports: false,
             sourcemap: true,
             freeze: false,
             esModule: false,
@@ -609,9 +647,11 @@ async function main() {
 
           await bundle.close()
 
-          console.timeEnd('Generated module bundles')
+          console.timeEnd(`Generated module bundles (${targets.module})`)
         },
         async () => {
+          if (!targets.node) return
+
           const inputs = entryPoints
             .filter(({ conditions }) => conditions.node !== null)
             .map(({ outputFile, conditions }) => [
@@ -621,7 +661,7 @@ async function main() {
 
           if (!inputs.length) return
 
-          console.time('Generated Node.js cjs bundles')
+          console.time(`Generated Node.js cjs bundles (${targets.node})`)
 
           const bundle = await rollup({
             input: Object.fromEntries(inputs),
@@ -671,31 +711,10 @@ async function main() {
               }),
               json({ preferConst: true }),
               swc({
-                // https://swc.rs/docs/configuration/modules
-                module: {
-                  type: 'es6',
-                  strictMode: false,
-                  ignoreDynamic: true,
-                },
-                sourceMaps: true,
                 jsc: {
-                  // TODO read from browserslist + env: esnext
                   target: targets.node,
-                  // https://swc.rs/docs/configuration/compilation#jscparser
-                  parser: {
-                    // TODO based on input files: typescript or ecmascript
-                    syntax: 'typescript',
-                  },
                   // https://swc.rs/docs/configuration/compilation#jsctransform
                   transform: {
-                    react: {
-                      // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
-                      runtime: 'automatic',
-                      // Use Object.assign() instead of _extends
-                      useBuiltins: true,
-                    },
-                    // TODO constModules from config? https://swc.rs/docs/configuration/compilation#jsctransformconstmodules
-                    constModules: {},
                     // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
                     optimizer: {
                       globals: {
@@ -709,12 +728,6 @@ async function main() {
                       },
                     },
                   },
-
-                  // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
-                  loose: false,
-                  externalHelpers: true,
-                  // Enabling this option will make swc preserve original class names.
-                  keepClassNames: true,
                 },
               }),
               dynamicImportVars({ warnOnError: true }),
@@ -746,19 +759,26 @@ async function main() {
             entryFileNames: `[name]${cjsExt}`,
             chunkFileNames: `_/[name]-[hash]${cjsExt}`,
             assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: 'es2015',
-            preferConst: true,
+            generatedCode: {
+              preset: 'es2015',
+              arrowFunctions: true,
+              constBindings: true,
+              objectShorthand: true,
+              // add: [Symbol.toStringTag]: { value: 'Module' }
+              symbols: true,
+            },
             hoistTransitiveImports: false,
             interop: 'auto',
-            minifyInternalExports: true,
+            minifyInternalExports: false,
             sourcemap: true,
             freeze: true,
             esModule: true,
+            strict: true,
           })
 
           await bundle.close()
 
-          console.timeEnd('Generated Node.js cjs bundles')
+          console.timeEnd(`Generated Node.js cjs bundles (${targets.node})`)
 
           // 2. generate esm wrapper for Node.js
           console.time('Generated Node.js esm wrappers')
@@ -795,6 +815,8 @@ async function main() {
           console.timeEnd('Generated Node.js esm wrappers')
         },
         async () => {
+          if (!targets.script) return
+
           const inputs = entryPoints.filter(
             ({ conditions }) =>
               conditions.script !== null &&
@@ -803,7 +825,7 @@ async function main() {
 
           if (!inputs.length) return
 
-          console.time('Generated browser global bundles')
+          console.time(`Generated browser global bundles (${targets.script})`)
 
           await Promise.all(
             inputs.map(async ({ outputFile, conditions }) => {
@@ -860,29 +882,10 @@ async function main() {
                   }),
                   json({ preferConst: true }),
                   swc({
-                    // https://swc.rs/docs/configuration/modules
-                    module: {
-                      type: 'es6',
-                      strictMode: false,
-                      ignoreDynamic: true,
-                    },
-                    sourceMaps: true,
                     jsc: {
-                      // TODO read from browserslist + env: esnext
                       target: targets.script,
-                      // https://swc.rs/docs/configuration/compilation#jscparser
-                      parser: {
-                        // TODO based on input files: typescript or ecmascript
-                        syntax: 'typescript',
-                      },
                       // https://swc.rs/docs/configuration/compilation#jsctransform
                       transform: {
-                        react: {
-                          // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
-                          runtime: 'automatic',
-                          // Use Object.assign() instead of _extends
-                          useBuiltins: true,
-                        },
                         // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
                         optimizer: {
                           globals: {
@@ -899,7 +902,6 @@ async function main() {
 
                       // https://2ality.com/2015/12/babel6-loose-mode.html
                       loose: true,
-                      externalHelpers: true,
                       keepClassNames: false,
 
                       // https://swc.rs/docs/configuration/minification
@@ -930,7 +932,7 @@ async function main() {
 
               const name =
                 content.match(/\/\*\s*@distilt-global-name\s+(\S+)\s*\*\//)?.[1] ||
-                (mainEntryPoint == outputFile
+                (mainEntryPoint === outputFile
                   ? globalName
                   : globalName + '_' + makeGlobalName(outputFile))
 
@@ -951,21 +953,28 @@ async function main() {
                     }[id] || makeGlobalName(id)
                   )
                 },
-                generatedCode: 'es2015',
-                preferConst: false,
+                generatedCode: {
+                  preset: 'es2015',
+                  arrowFunctions: true,
+                  constBindings: true,
+                  objectShorthand: true,
+                  // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                  symbols: false,
+                },
                 hoistTransitiveImports: false,
                 interop: 'auto',
                 minifyInternalExports: true,
                 sourcemap: true,
                 freeze: false,
                 esModule: false,
+                strict: true,
               })
 
               await bundle.close()
             }),
           )
 
-          console.timeEnd('Generated browser global bundles')
+          console.timeEnd(`Generated browser global bundles (${targets.script})`)
         },
         async () => {
           console.time('Bundled typescript declarations')

@@ -436,7 +436,7 @@ async function main() {
         publishManifest.exports[entryPoint].default =
           publishManifest.exports[entryPoint].default ||
           publishManifest.exports[entryPoint].node ||
-          publishManifest.exports[entryPoint].esnext ||
+          publishManifest.exports[entryPoint].module ||
           publishManifest.exports[entryPoint].script
 
         return {

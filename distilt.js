@@ -4,6 +4,7 @@ import { existsSync, accessSync, readFileSync } from 'node:fs'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 import { findUpSync } from 'find-up'
 import normalizeData from 'normalize-package-data'
@@ -12,6 +13,7 @@ import { makeLegalIdentifier } from '@rollup/pluginutils'
 
 import { rollup } from 'rollup'
 import { nodeResolve } from '@rollup/plugin-node-resolve'
+import commonjs from '@rollup/plugin-commonjs'
 import * as dynamicImportVarsNS from '@rollup/plugin-dynamic-import-vars'
 import json from '@rollup/plugin-json'
 import replace from '@rollup/plugin-replace'
@@ -42,7 +44,7 @@ function findPaths() {
 
   const tsconfig = findUpSync('tsconfig.json', { cwd: root })
 
-  return { current, workspace, root, dist, tsconfig }
+  return { current, workspace, root, relative: path.relative(workspace, root), dist, tsconfig }
 }
 
 async function main() {
@@ -74,7 +76,11 @@ async function main() {
   normalizeData(workspaceManifest)
   normalizeData(packageManifest)
 
-  const manifest = { ...workspaceManifest, ...packageManifest, ...allDepdenciesManifest }
+  const manifest = {
+    ...workspaceManifest,
+    ...packageManifest,
+    ...allDepdenciesManifest,
+  }
 
   // merge keywords
   manifest.keywords = [
@@ -97,8 +103,12 @@ async function main() {
 
     manifest.repository = {
       ...repository,
-      direction: path.relative(paths.workspace, paths.root),
+      directory: path.relative(paths.workspace, paths.root),
     }
+  }
+
+  if (manifest.publishConfig?.directory) {
+    paths.dist = path.resolve(paths.root, manifest.publishConfig.directory)
   }
 
   const resolveExtensions = ['.tsx', '.ts', '.jsx', '.mjs', '.js', '.cjs', '.css', '.json']
@@ -107,7 +117,7 @@ async function main() {
 
   const targets = {
     node:
-      manifest.distilt?.targets?.node ??
+      manifest.publishConfig?.targets?.node ??
       (await (async (nodeTarget = '14.x') => {
         const minNodeVersion = semver.minVersion(nodeTarget)
 
@@ -125,9 +135,10 @@ async function main() {
 
         return 'es2018' // >=10.0.0
       })(manifest.engines?.node)),
-    module: manifest.distilt?.targets?.module ?? 'es2021',
-    script: manifest.distilt?.targets?.script ?? 'es2017',
-    esnext: manifest.distilt?.targets?.esnext ?? 'es2022',
+    module: manifest.publishConfig?.targets?.module ?? 'es2021',
+    script: manifest.publishConfig?.targets?.script ?? 'es2017',
+    browser: manifest.publishConfig?.targets?.browser ?? 'es2019',
+    esnext: manifest.publishConfig?.targets?.esnext ?? 'es2022',
   }
 
   // Bundled dependencies are included in every bundle
@@ -153,26 +164,47 @@ async function main() {
   // The package itself is external as well
   external.push(manifest.name)
 
-  function swc(options = {}) {
+  let needsDevelopmentBuild = false
+
+  function swc({ mode, format, ...options } = {}) {
+    // https://github.com/swc-project/swc/blob/main/crates/swc_ecma_minifier/src/option/terser.rs#L429
+    const ecma = Math.min(2020, Number((options.jsc.target || 'es2015').slice(2)))
+
     return {
       name: 'swc',
-      resolveId(source, importer) {
-        if (
-          (source === '@swc/helpers' || source.startsWith('@swc/helpers/')) &&
-          importer !== fileURLToPath(import.meta.url) &&
-          !dependencies.includes('@swc/helpers')
-        ) {
-          return this.resolve(source, fileURLToPath(import.meta.url), { skipSelf: true }).then(
-            (resolved) => {
-              return resolved && { ...resolved, external: false }
-            },
-          )
+      resolveId(source) {
+        if (source === '@swc/helpers' || source.startsWith('@swc/helpers/')) {
+          if (manifest.dependencies['@swc/helpers']) {
+            // TODO: verify semver matches
+          } else {
+            manifest.dependencies['@swc/helpers'] = `^${
+              createRequire(import.meta.url)('@swc/helpers/package.json').version
+            }`
+          }
+
+          if (format === 'iife') {
+            return this.resolve(source, fileURLToPath(import.meta.url), { skipSelf: true }).then(
+              (resolved) => {
+                return resolved && { ...resolved, external: false }
+              },
+            )
+          }
+
+          if (format === 'cjs') {
+            source = source.replace('/src/', '/lib/').replace(/\.mjs$/, '.js')
+          }
+
+          return { id: source, external: true }
         }
       },
       async transform(code, filename) {
+        if (!needsDevelopmentBuild) {
+          needsDevelopmentBuild = /from\s+(["'])distilt\/env\1/.test(code)
+        }
+
         return transform(code, {
-          sourceMaps: true,
           ...options,
+          envName: mode,
           // https://swc.rs/docs/configuration/modules
           module: {
             type: 'es6',
@@ -200,8 +232,20 @@ async function main() {
             transform: {
               ...options.jsc.transform,
 
-              // TODO constModules from config? https://swc.rs/docs/configuration/compilation#jsctransformconstmodules
-              // constModules: {},
+              // https://swc.rs/docs/configuration/compilation#jsctransformconstmodules
+              constModules: {
+                ...options.jsc.transform?.constModules,
+                globals: {
+                  ...options.jsc.transform?.constModules?.globals,
+                  'distilt/env': {
+                    // TODO: add target like node, browser, script, module, esnext
+                    MODE: JSON.stringify(mode === 'development' ? 'development' : 'production'),
+                    DEV: String(mode === 'development'),
+                    PROD: String(mode !== 'development'),
+                    ...options.jsc.transform?.constModules?.globals?.['distilt/env'],
+                  },
+                },
+              },
 
               react: {
                 // https://reactjs.org/blog/2020/09/22/introducing-the-new-jsx-transform.html
@@ -229,9 +273,85 @@ async function main() {
       renderChunk(code, chunk) {
         if (options.minify) {
           return minify(code, {
-            ...options.jsc?.minify,
+            // https://github.com/swc-project/swc/blob/main/crates/swc_ecma_minifier/src/option/terser.rs#L429
+            ecma,
+            mangle: true,
+            // https://swc.rs/docs/configuration/minification
+            ...options.jsc.minify,
+            compress: {
+              ecma,
+              passes: 0,
+              keep_infinity: true,
+              pure_getters: true,
+              keep_fargs: false,
+              typeofs: false,
+              unsafe_symbols: mode === 'production',
+              const_to_let: true,
+              ...options.jsc.minify?.compress,
+            },
             sourceMap: true,
             outputPath: chunk.fileName,
+          })
+        } else {
+          // return
+          return transform(code, {
+            ...options,
+            envName: mode,
+            // https://swc.rs/docs/configuration/modules
+            module: {
+              type: 'es6',
+              strictMode: false,
+              ignoreDynamic: true,
+              ...options.module,
+            },
+            jsc: {
+              // TODO enable loose? https://2ality.com/2015/12/babel6-loose-mode.html
+              loose: false,
+              externalHelpers: true,
+              // Enabling this option will make swc preserve original class names.
+              keepClassNames: true,
+
+              ...options.jsc,
+
+              // https://swc.rs/docs/configuration/compilation#jscparser
+              parser: {
+                // TODO based on input files: typescript or ecmascript
+                syntax: 'typescript',
+                ...options.jsc.parser,
+              },
+
+              // https://swc.rs/docs/configuration/compilation#jsctransform
+              transform: undefined,
+
+              experimental: {
+                keepImportAssertions: true,
+                ...options.jsc.experimental,
+              },
+
+              preserveAllComments: true,
+              minify: {
+                compress: {
+                  ecma,
+                  defaults: true,
+                  passes: 0,
+                  booleans: false,
+                  arrows: false,
+                  booleans: false,
+                  keep_classnames: true,
+                  keep_fnames: true,
+                  keep_infinity: true,
+                  sequences: false,
+                  typeofs: false,
+                  unsafe_symbols: mode === 'production',
+                  const_to_let: true,
+                },
+                mangle: false,
+              },
+            },
+
+            sourceMaps: true,
+            minify: false,
+            filename: chunk.fileName,
           })
         }
       },
@@ -275,6 +395,8 @@ async function main() {
       ...manifest.publishConfig,
       // Remove directory as it is no longer needed
       directory: undefined,
+      // Remove distilt options
+      targets: undefined,
     },
 
     // These are not needed any more
@@ -297,8 +419,8 @@ async function main() {
     devDependencies: undefined,
 
     // Reset config sections
-    distilt: undefined,
     pnpm: undefined,
+    typedoc: undefined,
     eslintConfig: undefined,
     prettier: undefined,
     np: undefined,
@@ -313,6 +435,7 @@ async function main() {
   }
 
   console.log(`Bundling ${manifest.name}@${manifest.version}`)
+  console.time(`Bundled ${manifest.name}@${manifest.version}`)
 
   await prepare()
 
@@ -324,6 +447,8 @@ async function main() {
     const typesDirectory = await typesDirectoryPromise
     typesDirectory && (fs.rm || fs.rmdir)(typesDirectory, { force: true, recursive: true })
   }
+
+  console.timeEnd(`Bundled ${manifest.name}@${manifest.version}`)
 
   if (packageManifest['size-limit']) {
     const { default: run } = await import('size-limit/run.js')
@@ -404,6 +529,8 @@ async function main() {
           // typescript
           types: paths.tsconfig ? `${outputFile}.d.ts` : undefined,
 
+          development: undefined,
+
           // used by bundlers — compatible with current Spec and stage 4 proposals
           esnext:
             targets.esnext && conditions.esnext !== null ? `${outputFile}.esnext.js` : undefined,
@@ -412,6 +539,12 @@ async function main() {
           module: targets.module
             ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
             : undefined,
+
+          // used by some bundlers and jspm.dev
+          browser:
+            targets.browser && conditions.browser !== null
+              ? (conditions.browser || conditions.default) && `${outputFile}.browser.js`
+              : undefined,
 
           // for direct script usage
           script:
@@ -433,13 +566,18 @@ async function main() {
           default: undefined,
         }
 
-        publishManifest.exports[entryPoint].default =
-          publishManifest.exports[entryPoint].default ||
-          publishManifest.exports[entryPoint].node ||
-          publishManifest.exports[entryPoint].module ||
-          publishManifest.exports[entryPoint].script
+        if (!publishManifest.exports[entryPoint].default) {
+          publishManifest.exports[entryPoint].default =
+            publishManifest.exports[entryPoint].module ||
+            (type === 'commonjs'
+              ? publishManifest.exports[entryPoint].node?.require
+              : publishManifest.exports[entryPoint].node?.import) ||
+            publishManifest.exports[entryPoint].esnext ||
+            publishManifest.exports[entryPoint].script
+        }
 
         return {
+          entryPoint,
           outputFile: outputFile.slice(2),
           conditions,
         }
@@ -448,8 +586,6 @@ async function main() {
 
     if (publishManifest.exports['.']) {
       Object.assign(publishManifest, {
-        // Not needed anymore
-        browser: undefined,
         // Used by node
         main: publishManifest.exports['.'].node?.require || publishManifest.exports['.'].module,
         // Used by bundlers like rollup and CDNs
@@ -458,6 +594,8 @@ async function main() {
         // Support common CDNs
         unpkg: publishManifest.exports['.'].script,
         jsdelivr: publishManifest.exports['.'].script,
+        // Used by bundlers and jspm.dev
+        browser: publishManifest.exports['.'].browser,
         // Typescript
         types: publishManifest.exports['.'].types,
       })
@@ -465,531 +603,831 @@ async function main() {
 
     const manifestPath = path.resolve(paths.dist, 'package.json')
     await fs.mkdir(path.dirname(manifestPath), { recursive: true })
-    await fs.writeFile(manifestPath, JSON.stringify(publishManifest, omitComments, 2))
 
-    await Promise.all(
-      [
-        async () => {
-          if (!targets.esnext) return
+    const generatedBundles = async (mode = 'production') => {
+      const suffix = mode === 'development' ? '.dev' : ''
 
-          const inputs = entryPoints
-            .filter(({ conditions }) => conditions.esnext !== null)
-            .map(({ outputFile, conditions }) => [
-              outputFile,
-              conditions.default || conditions.browser || conditions.node,
-            ])
+      await Promise.all(
+        [
+          async () => {
+            if (!targets.esnext) return
 
-          if (!inputs.length) return
+            const inputs = entryPoints
+              .filter(({ conditions }) => conditions.esnext !== null)
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.default || conditions.browser || conditions.node,
+              ])
+              .filter(([_, source]) => source)
 
-          console.time(`Generated esnext bundles (${targets.esnext})`)
+            if (!inputs.length) return
 
-          const bundle = await rollup({
-            input: Object.fromEntries(inputs),
-            external: (source) =>
-              external.includes(source) ||
-              external.some((external) => source.startsWith(external + '/')),
-            preserveEntrySignatures: 'strict',
-            treeshake: {
-              propertyReadSideEffects: false,
-            },
-            onwarn(warning, warn) {
-              if (
-                warning.code === 'CIRCULAR_DEPENDENCY' ||
-                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
-              ) {
-                return
-              }
+            console.time(`Generated esnext bundles (${targets.esnext}) [${mode}]`)
 
-              // Use default for everything else
-              warn(warning)
-            },
-            plugins: [
-              tsPaths({ tsConfigPath: paths.tsconfig }),
-              nodeResolve({
-                extensions: resolveExtensions,
-                mainFields: [
-                  'esnext',
-                  'esmodules',
-                  'modern',
-                  'es2015',
-                  'module',
-                  'jsnext:main',
-                  'main',
-                ],
-                exportConditions: [
-                  'production',
-                  'esnext',
-                  'modern',
-                  'esmodules',
-                  'es2015',
-                  'module',
-                  'import',
-                  'default',
-                  'require',
-                ],
-              }),
-              json({ preferConst: true }),
-              swc({ jsc: { target: targets.esnext } }),
-              dynamicImportVars({ warnOnError: true }),
-            ],
-          })
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (
+                  warning.code === 'CIRCULAR_DEPENDENCY' ||
+                  (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+                ) {
+                  return
+                }
 
-          await bundle.write({
-            format: 'es',
-            dir: paths.dist,
-            entryFileNames: '[name].esnext.js',
-            chunkFileNames: '_/[name]-[hash].js',
-            assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: {
-              preset: 'es2015',
-              arrowFunctions: true,
-              constBindings: true,
-              objectShorthand: true,
-              // prevent: [Symbol.toStringTag]: { value: 'Module' }
-              symbols: false,
-            },
-            hoistTransitiveImports: false,
-            interop: 'auto',
-            minifyInternalExports: false,
-            sourcemap: true,
-            freeze: false,
-            esModule: false,
-          })
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  extensions: resolveExtensions,
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'import',
+                    'require',
+                    'default',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({ mode, format: 'es', jsc: { target: targets.esnext } }),
+                dynamicImportVars({ warnOnError: true }),
+              ],
+            })
 
-          await bundle.close()
+            await bundle.write({
+              format: 'es',
+              dir: paths.dist,
+              entryFileNames: `[name].esnext${suffix}.js`,
+              chunkFileNames: `_/[name]-[hash].js`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: false,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: false,
+              sourcemap: true,
+              freeze: false,
+              esModule: false,
+            })
 
-          console.timeEnd(`Generated esnext bundles (${targets.esnext})`)
-        },
-        async () => {
-          if (!targets.module) return
+            await bundle.close()
 
-          const inputs = entryPoints.map(({ outputFile, conditions }) => [
-            outputFile,
-            conditions.default || conditions.browser || conditions.node,
-          ])
+            console.timeEnd(`Generated esnext bundles (${targets.esnext}) [${mode}]`)
+          },
+          async () => {
+            if (!targets.module) return
 
-          if (!inputs.length) return
+            const inputs = entryPoints
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.default || conditions.browser || conditions.node,
+              ])
+              .filter(([_, source]) => source)
 
-          console.time(`Generated module bundles (${targets.module})`)
+            if (!inputs.length) return
 
-          const bundle = await rollup({
-            input: Object.fromEntries(inputs),
-            external: (source) =>
-              external.includes(source) ||
-              external.some((external) => source.startsWith(external + '/')),
-            preserveEntrySignatures: 'strict',
-            treeshake: {
-              propertyReadSideEffects: false,
-            },
-            onwarn(warning, warn) {
-              if (
-                warning.code === 'CIRCULAR_DEPENDENCY' ||
-                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
-              ) {
-                return
-              }
+            console.time(`Generated module bundles (${targets.module}) [${mode}]`)
 
-              // Use default for everything else
-              warn(warning)
-            },
-            plugins: [
-              tsPaths({ tsConfigPath: paths.tsconfig }),
-              nodeResolve({
-                extensions: resolveExtensions,
-                mainFields: [
-                  'esnext',
-                  'esmodules',
-                  'modern',
-                  'es2015',
-                  'module',
-                  'jsnext:main',
-                  'main',
-                ],
-                exportConditions: [
-                  'production',
-                  'esnext',
-                  'modern',
-                  'esmodules',
-                  'es2015',
-                  'module',
-                  'import',
-                  'default',
-                  'require',
-                ],
-              }),
-              json({ preferConst: true }),
-              swc({ jsc: { target: targets.module } }),
-              dynamicImportVars({ warnOnError: true }),
-            ],
-          })
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (
+                  warning.code === 'CIRCULAR_DEPENDENCY' ||
+                  (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+                ) {
+                  return
+                }
 
-          await bundle.write({
-            format: 'es',
-            dir: paths.dist,
-            entryFileNames: `[name]${type === 'commonjs' ? '.esm' : ''}.js`,
-            chunkFileNames: `_/[name]-[hash]${type === 'commonjs' ? '.esm' : ''}.js`,
-            assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: {
-              preset: 'es2015',
-              arrowFunctions: true,
-              constBindings: true,
-              objectShorthand: true,
-              // prevent: [Symbol.toStringTag]: { value: 'Module' }
-              symbols: false,
-            },
-            hoistTransitiveImports: false,
-            interop: 'auto',
-            minifyInternalExports: false,
-            sourcemap: true,
-            freeze: false,
-            esModule: false,
-          })
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  extensions: resolveExtensions,
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'import',
+                    'require',
+                    'default',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({ mode, format: 'es', jsc: { target: targets.module } }),
+                dynamicImportVars({ warnOnError: true }),
+              ],
+            })
 
-          await bundle.close()
+            await bundle.write({
+              format: 'es',
+              dir: paths.dist,
+              entryFileNames: `[name]${type === 'commonjs' ? '.esm' : ''}${suffix}.js`,
+              chunkFileNames: `_/[name]-[hash].js`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: false,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: false,
+              sourcemap: true,
+              freeze: false,
+              esModule: false,
+            })
 
-          console.timeEnd(`Generated module bundles (${targets.module})`)
-        },
-        async () => {
-          if (!targets.node) return
+            await bundle.close()
 
-          const inputs = entryPoints
-            .filter(({ conditions }) => conditions.node !== null)
-            .map(({ outputFile, conditions }) => [
-              outputFile,
-              conditions.node || conditions.default,
-            ])
+            console.timeEnd(`Generated module bundles (${targets.module}) [${mode}]`)
+          },
+          async () => {
+            if (!targets.node) return
 
-          if (!inputs.length) return
+            const inputs = entryPoints
+              .filter(({ conditions }) => conditions.node !== null)
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.node || conditions.default,
+              ])
+              .filter(([_, source]) => source)
 
-          console.time(`Generated Node.js cjs bundles (${targets.node})`)
+            if (!inputs.length) return
 
-          const bundle = await rollup({
-            input: Object.fromEntries(inputs),
-            external: (source) =>
-              external.includes(source) ||
-              external.some((external) => source.startsWith(external + '/')),
-            preserveEntrySignatures: 'strict',
-            treeshake: {
-              propertyReadSideEffects: false,
-            },
-            onwarn(warning, warn) {
-              if (
-                warning.code === 'CIRCULAR_DEPENDENCY' ||
-                (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
-              ) {
-                return
-              }
+            console.time(`Generated Node.js cjs bundles (${targets.node}) [${mode}]`)
 
-              // Use default for everything else
-              warn(warning)
-            },
-            plugins: [
-              tsPaths({ tsConfigPath: paths.tsconfig }),
-              nodeResolve({
-                extensions: [...resolveExtensions, '.node'],
-                mainFields: [
-                  'esnext',
-                  'esmodules',
-                  'modern',
-                  'es2015',
-                  'module',
-                  'jsnext:main',
-                  'main',
-                ],
-                exportConditions: [
-                  'node',
-                  'production',
-                  'esnext',
-                  'modern',
-                  'esmodules',
-                  'es2015',
-                  'module',
-                  'import',
-                  'default',
-                  'require',
-                ],
-              }),
-              json({ preferConst: true }),
-              swc({
-                jsc: {
-                  target: targets.node,
-                  // https://swc.rs/docs/configuration/compilation#jsctransform
-                  transform: {
-                    // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
-                    optimizer: {
-                      globals: {
-                        // If you set { "window": "object" }, typeof window will be replaced with "object".
-                        typeofs: {
-                          self: 'undefined',
-                          window: 'undefined',
-                          document: 'undefined',
-                          process: 'object',
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (
+                  warning.code === 'CIRCULAR_DEPENDENCY' ||
+                  (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:'))
+                ) {
+                  return
+                }
+
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  extensions: [...resolveExtensions, '.node'],
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    'node',
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'import',
+                    'require',
+                    'default',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({
+                  mode,
+                  format: 'cjs',
+                  jsc: {
+                    target: targets.node,
+                    // https://swc.rs/docs/configuration/compilation#jsctransform
+                    transform: {
+                      // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                      optimizer: {
+                        globals: {
+                          // If you set { "window": "object" }, typeof window will be replaced with "object".
+                          typeofs: {
+                            self: 'undefined',
+                            window: 'undefined',
+                            document: 'undefined',
+                            process: 'object',
+                          },
                         },
                       },
                     },
                   },
-                },
-              }),
-              dynamicImportVars({ warnOnError: true }),
-              replace({
-                preventAssignment: true,
-                values: {
-                  'process.browser': false,
-                  'import.meta.url': '__$$shim_import_meta_url',
-                  'import.meta.resolve': '__$$shim_import_meta_resolve',
-                },
-              }),
-              inject({
-                __$$shim_import_meta_url: [
-                  fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
-                  'shim_import_meta_url',
-                ],
-                __$$shim_import_meta_resolve: [
-                  fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
-                  'shim_import_meta_resolve',
-                ],
-              }),
-            ],
-          })
+                }),
+                dynamicImportVars({ warnOnError: true }),
+                replace({
+                  preventAssignment: true,
+                  values: {
+                    'process.browser': false,
+                    'import.meta.url': '__$$shim_import_meta_url',
+                    'import.meta.resolve': '__$$shim_import_meta_resolve',
+                  },
+                }),
+                inject({
+                  __$$shim_import_meta_url: [
+                    fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
+                    'shim_import_meta_url',
+                  ],
+                  __$$shim_import_meta_resolve: [
+                    fileURLToPath(new URL('./shim-node-cjs.js', import.meta.url)),
+                    'shim_import_meta_resolve',
+                  ],
+                }),
+              ],
+            })
 
-          const { output } = await bundle.write({
-            format: 'cjs',
-            exports: 'auto',
-            dir: paths.dist,
-            entryFileNames: `[name]${cjsExt}`,
-            chunkFileNames: `_/[name]-[hash]${cjsExt}`,
-            assetFileNames: '_/assets/[name]-[hash][extname]',
-            generatedCode: {
-              preset: 'es2015',
-              arrowFunctions: true,
-              constBindings: true,
-              objectShorthand: true,
-              // add: [Symbol.toStringTag]: { value: 'Module' }
-              symbols: true,
-            },
-            hoistTransitiveImports: false,
-            interop: 'auto',
-            minifyInternalExports: false,
-            sourcemap: true,
-            freeze: true,
-            esModule: true,
-            strict: true,
-          })
+            const { output } = await bundle.write({
+              format: 'cjs',
+              exports: 'auto',
+              dir: paths.dist,
+              entryFileNames: `[name]${suffix}${cjsExt}`,
+              chunkFileNames: `_/[name]-[hash]${cjsExt}`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // add: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: true,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: false,
+              sourcemap: true,
+              freeze: true,
+              esModule: true,
+              strict: true,
+            })
 
-          await bundle.close()
+            await bundle.close()
 
-          console.timeEnd(`Generated Node.js cjs bundles (${targets.node})`)
+            console.timeEnd(`Generated Node.js cjs bundles (${targets.node}) [${mode}]`)
 
-          // 2. generate esm wrapper for Node.js
-          console.time('Generated Node.js esm wrappers')
-          await Promise.all(
-            output
-              .filter((chunk) => chunk.isEntry)
-              .map(async ({ name, exports }) => {
-                // exports: [ '*@twind/core', 'default', 'toColorValue' ]
+            // 2. generate esm wrapper for Node.js
+            console.time(`Generated Node.js esm wrappers [${mode}]`)
+            await Promise.all(
+              output
+                .filter((chunk) => chunk.isEntry)
+                .map(async ({ name, exports }) => {
+                  // exports: [ '*@twind/core', 'default', 'toColorValue' ]
 
-                let wrapper = ''
+                  let wrapper = ''
 
-                if (!exports.includes('default')) {
-                  wrapper += `import __$$ from ${JSON.stringify(`./${name}${cjsExt}`)};\n`
-                  wrapper += `export default __$$;\n`
-                }
-
-                exports
-                  .filter((name) => name[0] == '*')
-                  .forEach((name) => {
-                    wrapper += `export * from ${JSON.stringify(name.slice(1))};\n`
-                  })
-
-                const namedExports = exports.filter((name) => name[0] != '*')
-                if (namedExports.length) {
-                  wrapper += `export { ${namedExports.join(', ')} } from ${JSON.stringify(
-                    `./${name}${cjsExt}`,
-                  )};\n`
-                }
-
-                await fs.writeFile(path.resolve(paths.dist, name + '.mjs'), wrapper)
-              }),
-          )
-
-          console.timeEnd('Generated Node.js esm wrappers')
-        },
-        async () => {
-          if (!targets.script) return
-
-          const inputs = entryPoints.filter(
-            ({ conditions }) =>
-              conditions.script !== null &&
-              (conditions.script || conditions.browser || conditions.default),
-          )
-
-          if (!inputs.length) return
-
-          console.time(`Generated browser global bundles (${targets.script})`)
-
-          await Promise.all(
-            inputs.map(async ({ outputFile, conditions }) => {
-              const inputFile = conditions.script || conditions.browser || conditions.default
-
-              const bundle = await rollup({
-                input: inputFile,
-                external: (source) =>
-                  scriptExternal.includes(source) ||
-                  scriptExternal.some((external) => source.startsWith(external + '/')),
-                preserveEntrySignatures: 'strict',
-                treeshake: {
-                  propertyReadSideEffects: false,
-                },
-                onwarn(warning, warn) {
-                  if (warning.code === 'CIRCULAR_DEPENDENCY') {
-                    return
+                  if (!exports.includes('default')) {
+                    wrapper += `import __$$ from ${JSON.stringify(
+                      `./${name}${suffix}${cjsExt}`,
+                    )};\n`
+                    wrapper += `export default __$$;\n`
                   }
 
-                  if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
-                    throw new Error(warning.message)
+                  exports
+                    .filter((name) => name[0] == '*')
+                    .forEach((name) => {
+                      wrapper += `export * from ${JSON.stringify(name.slice(1))};\n`
+                    })
+
+                  const namedExports = exports.filter((name) => name[0] != '*')
+                  if (namedExports.length) {
+                    wrapper += `export { ${namedExports.join(', ')} } from ${JSON.stringify(
+                      `./${name}${suffix}${cjsExt}`,
+                    )};\n`
                   }
 
-                  // Use default for everything else
-                  warn(warning)
-                },
-                plugins: [
-                  tsPaths({ tsConfigPath: paths.tsconfig }),
-                  nodeResolve({
-                    browser: true,
-                    extensions: resolveExtensions,
-                    mainFields: [
-                      'esnext',
-                      'esmodules',
-                      'modern',
-                      'es2015',
-                      'module',
-                      'browser',
-                      'jsnext:main',
-                      'main',
-                    ],
-                    exportConditions: [
-                      'production',
-                      'esnext',
-                      'modern',
-                      'esmodules',
-                      'es2015',
-                      'module',
-                      'import',
-                      'default',
-                      'require',
-                      'browser',
-                    ],
-                  }),
-                  json({ preferConst: true }),
-                  swc({
-                    jsc: {
-                      target: targets.script,
-                      // https://swc.rs/docs/configuration/compilation#jsctransform
-                      transform: {
-                        // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
-                        optimizer: {
-                          globals: {
-                            // If you set { "window": "object" }, typeof window will be replaced with "object".
-                            typeofs: {
-                              self: 'object',
-                              window: 'object',
-                              document: 'object',
-                              process: 'undefined',
-                            },
+                  await fs.writeFile(path.resolve(paths.dist, `${name}${suffix}.mjs`), wrapper)
+                }),
+            )
+
+            console.timeEnd(`Generated Node.js esm wrappers [${mode}]`)
+          },
+          async () => {
+            if (!targets.browser) return
+
+            const inputs = entryPoints
+              .filter(({ conditions }) => conditions.browser !== null)
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.browser || conditions.default,
+              ])
+              .filter(([_, source]) => source)
+
+            if (!inputs.length) return
+
+            console.time(`Generated browser bundles (${targets.browser}) [${mode}]`)
+
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (warning.code === 'CIRCULAR_DEPENDENCY') {
+                  return
+                }
+
+                if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
+                  throw new Error(warning.message)
+                }
+
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  browser: true,
+                  extensions: resolveExtensions,
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'browser',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'import',
+                    'require',
+                    'default',
+                    'browser',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({
+                  mode,
+                  format: 'es',
+                  jsc: {
+                    target: targets.browser, // https://swc.rs/docs/configuration/compilation#jsctransform
+                    transform: {
+                      // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                      optimizer: {
+                        globals: {
+                          // If you set { "window": "object" }, typeof window will be replaced with "object".
+                          typeofs: {
+                            self: 'object',
+                            window: 'object',
+                            document: 'object',
+                            process: 'undefined',
                           },
                         },
                       },
+                    },
 
-                      // https://2ality.com/2015/12/babel6-loose-mode.html
-                      loose: true,
-                      keepClassNames: false,
+                    // https://2ality.com/2015/12/babel6-loose-mode.html
+                    loose: true,
+                    keepClassNames: false,
+                  },
+                  minify: true,
+                }),
+                replace({
+                  preventAssignment: true,
+                  values: {
+                    'process.browser': true,
+                    'process.env.NODE_ENV': JSON.stringify(mode),
+                  },
+                }),
+                dynamicImportVars({ warnOnError: true }),
+              ],
+            })
 
-                      // https://swc.rs/docs/configuration/minification
-                      minify: {
-                        compress: {
-                          ecma: Number(targets.script.slice(2)), // specify one of: 5, 2015, 2016, etc.
-                          keep_infinity: true,
-                          pure_getters: true,
+            await bundle.write({
+              format: 'es',
+              dir: paths.dist,
+              entryFileNames: `[name].browser${suffix}.js`,
+              chunkFileNames: `_/[name]-[hash].js`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              compact: true,
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: false,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: true,
+              sourcemap: true,
+              freeze: false,
+              esModule: false,
+            })
+
+            await bundle.close()
+
+            console.timeEnd(`Generated browser bundles (${targets.browser}) [${mode}]`)
+          },
+
+          async () => {
+            if (!targets.script) return
+
+            const inputs = entryPoints.filter(
+              ({ conditions }) =>
+                conditions.script !== null &&
+                (conditions.script || conditions.browser || conditions.default),
+            )
+
+            if (!inputs.length) return
+
+            console.time(`Generated script bundles (${targets.script}) [${mode}]`)
+
+            await Promise.all(
+              inputs.map(async ({ outputFile, conditions }) => {
+                const inputFile = conditions.script || conditions.browser || conditions.default
+
+                const bundle = await rollup({
+                  input: inputFile,
+                  external: (source) =>
+                    scriptExternal.includes(source) ||
+                    scriptExternal.some((external) => source.startsWith(external + '/')),
+                  preserveEntrySignatures: 'strict',
+                  treeshake: {
+                    propertyReadSideEffects: false,
+                  },
+                  onwarn(warning, warn) {
+                    if (warning.code === 'CIRCULAR_DEPENDENCY') {
+                      return
+                    }
+
+                    if (
+                      warning.code === 'UNRESOLVED_IMPORT' &&
+                      warning.source?.startsWith('node:')
+                    ) {
+                      throw new Error(warning.message)
+                    }
+
+                    // Use default for everything else
+                    warn(warning)
+                  },
+                  plugins: [
+                    tsPaths({ tsConfigPath: paths.tsconfig }),
+                    commonjs({
+                      extensions: ['.cjs', '.js'],
+                    }),
+                    nodeResolve({
+                      browser: true,
+                      extensions: resolveExtensions,
+                      mainFields: [
+                        'esnext',
+                        'esmodules',
+                        'modern',
+                        'es2015',
+                        'module',
+                        'browser',
+                        'jsnext:main',
+                        'main',
+                      ],
+                      exportConditions: [
+                        mode,
+                        'esnext',
+                        'modern',
+                        'esmodules',
+                        'es2015',
+                        'module',
+                        'import',
+                        'default',
+                        'require',
+                        'browser',
+                      ],
+                    }),
+                    json({ preferConst: true }),
+                    swc({
+                      mode,
+                      format: 'iife',
+                      jsc: {
+                        target: targets.script,
+                        // https://swc.rs/docs/configuration/compilation#jsctransform
+                        transform: {
+                          // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                          optimizer: {
+                            globals: {
+                              // If you set { "window": "object" }, typeof window will be replaced with "object".
+                              typeofs: {
+                                self: 'object',
+                                window: 'object',
+                                document: 'object',
+                                process: 'undefined',
+                              },
+                            },
+                          },
                         },
-                        mangle: true,
+
+                        // https://2ality.com/2015/12/babel6-loose-mode.html
+                        loose: true,
+                        keepClassNames: false,
                       },
-                    },
 
-                    minify: true,
-                  }),
-                  replace({
-                    preventAssignment: true,
-                    values: {
-                      'process.browser': true,
-                      'process.env.NODE_ENV': `"production"`,
-                    },
-                  }),
-                  dynamicImportVars({ warnOnError: true }),
-                ],
-              })
+                      minify: true,
+                    }),
+                    replace({
+                      preventAssignment: true,
+                      values: {
+                        'process.browser': true,
+                        'process.env.NODE_ENV': JSON.stringify(mode),
+                      },
+                    }),
+                    dynamicImportVars({ warnOnError: true }),
+                  ],
+                })
 
-              const content = await fs.readFile(inputFile, { encoding: 'utf-8' })
+                const content = await fs.readFile(inputFile, { encoding: 'utf-8' })
 
-              const name =
-                content.match(/\/\*\s*@distilt-global-name\s+(\S+)\s*\*\//)?.[1] ||
-                (mainEntryPoint === outputFile
-                  ? globalName
-                  : globalName + '_' + makeGlobalName(outputFile))
+                const name =
+                  content.match(/\/\*\s*@distilt-global-name\s+(\S+)\s*\*\//)?.[1] ||
+                  (mainEntryPoint === outputFile
+                    ? globalName
+                    : globalName + '_' + makeGlobalName(outputFile))
 
-              await bundle.write({
-                format: 'iife',
-                file: path.resolve(paths.dist, `${outputFile}.global.js`),
-                assetFileNames: '_/assets/[name]-[hash][extname]',
-                name,
-                compact: true,
-                inlineDynamicImports: true,
-                // TODO configureable globals
-                globals: (id) => {
-                  return (
-                    {
-                      lodash: '_',
-                      'lodash-es': '_',
-                      jquery: '$',
-                    }[id] || makeGlobalName(id)
-                  )
-                },
-                generatedCode: {
-                  preset: 'es2015',
-                  arrowFunctions: true,
-                  constBindings: true,
-                  objectShorthand: true,
-                  // prevent: [Symbol.toStringTag]: { value: 'Module' }
-                  symbols: false,
-                },
-                hoistTransitiveImports: false,
-                interop: 'auto',
-                minifyInternalExports: true,
-                sourcemap: true,
-                freeze: false,
-                esModule: false,
-                strict: true,
-              })
+                await bundle.write({
+                  format: 'iife',
+                  file: path.resolve(paths.dist, `${outputFile}.global${suffix}.js`),
+                  assetFileNames: '_/assets/[name]-[hash][extname]',
+                  name,
+                  compact: true,
+                  inlineDynamicImports: true,
+                  // TODO configureable globals
+                  globals: (id) => {
+                    return (
+                      {
+                        lodash: '_',
+                        'lodash-es': '_',
+                        jquery: '$',
+                      }[id] || makeGlobalName(id)
+                    )
+                  },
+                  generatedCode: {
+                    preset: 'es2015',
+                    arrowFunctions: true,
+                    constBindings: true,
+                    objectShorthand: true,
+                    // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                    symbols: false,
+                  },
+                  hoistTransitiveImports: false,
+                  interop: 'auto',
+                  minifyInternalExports: true,
+                  sourcemap: true,
+                  freeze: false,
+                  esModule: false,
+                  strict: true,
+                })
 
-              await bundle.close()
-            }),
+                await bundle.close()
+              }),
+            )
+
+            console.timeEnd(`Generated script bundles (${targets.script}) [${mode}]`)
+          },
+        ].map((task) => task()),
+      )
+    }
+
+    await Promise.all([
+      (async () => {
+        await generatedBundles('production')
+
+        if (needsDevelopmentBuild) {
+          for (const { entryPoint } of entryPoints) {
+            publishManifest.exports[entryPoint].development = {
+              // used by bundlers — compatible with current Spec and stage 4 proposals
+              esnext: publishManifest.exports[entryPoint].esnext?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+
+              // used by bundlers
+              module: publishManifest.exports[entryPoint].module?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+
+              // for bundlers and jsbpm.dev
+              browser: publishManifest.exports[entryPoint].browser?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+
+              // for direct script usage
+              script: publishManifest.exports[entryPoint].script?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+
+              // Node.js
+              node: publishManifest.exports[entryPoint].node && {
+                // nodejs esm wrapper
+                import: publishManifest.exports[entryPoint].node.import.replace(
+                  /\.([cm]?js)$/,
+                  '.dev.$1',
+                ),
+                require: publishManifest.exports[entryPoint].node.require.replace(
+                  /\.([cm]?js)$/,
+                  '.dev.$1',
+                ),
+              },
+
+              default: publishManifest.exports[entryPoint].default?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+            }
+          }
+
+          await generatedBundles('development')
+        }
+
+        const readFile = (file) =>
+          readFileSync(path.resolve(paths.dist, file), 'utf8').replace(
+            /^\/\/# sourceMappingURL=\S+\.map$/m,
+            '',
           )
 
-          console.timeEnd(`Generated browser global bundles (${targets.script})`)
-        },
-        async () => {
-          console.time('Bundled typescript declarations')
-          await Promise.all(
-            entryPoints.map(({ outputFile, conditions }) => {
-              return generateTypesBundle(
-                conditions.default || conditions.browser || conditions.node,
-                path.resolve(paths.dist, `${outputFile}.d.ts`),
+        const createFacade = async (from, to, isCJS = false) => {
+          const toFile = path.resolve(paths.dist, to)
+          const fromFile = path.resolve(paths.dist, from)
+
+          const target = path.relative(path.dirname(fromFile), toFile)
+          const relative = target[0] === '.' ? target : `./${target}`
+
+          let content
+          if (isCJS) {
+            content = `module.exports = require(${JSON.stringify(relative)});`
+          } else {
+            const { parse } = await import('es-module-lexer')
+            const { 1: exports, 2: facade } = await parse(readFileSync(toFile, 'utf8'))
+
+            content =
+              [
+                (facade || exports.some(({ n }) => n && n !== 'default')) &&
+                  `export * from ${JSON.stringify(relative)};`,
+                exports.some(({ n }) => n === 'default') &&
+                  `export { default } from ${JSON.stringify(relative)};`,
+              ]
+                .filter(Boolean)
+                .join('\n') || `import ${JSON.stringify(relative)};`
+          }
+
+          await fs.writeFile(fromFile, content)
+          await fs.unlink(`${fromFile}.map`)
+        }
+
+        console.time('De-duplicated entry points based on content')
+        // de-duplicate entryPoints
+        for (const { entryPoint } of entryPoints) {
+          if (needsDevelopmentBuild) {
+            const {
+              esnext,
+              module,
+              browser,
+              node: { require: node } = {},
+            } = publishManifest.exports[entryPoint]
+            const {
+              esnext: esnextDev,
+              module: moduleDev,
+              browser: browserDev,
+              node: { require: nodeDev } = {},
+            } = publishManifest.exports[entryPoint].development
+
+            if (esnext && esnextDev && readFile(esnext) === readFile(esnextDev)) {
+              await createFacade(esnextDev, esnext)
+            }
+
+            if (module && moduleDev && readFile(module) === readFile(moduleDev)) {
+              await createFacade(moduleDev, module)
+            }
+
+            if (browser && browserDev && readFile(browser) === readFile(browserDev)) {
+              await createFacade(browserDev, browser)
+            }
+
+            if (node && nodeDev && readFile(node) === readFile(nodeDev)) {
+              await createFacade(nodeDev, node, true)
+            }
+          }
+
+          // esnext maybe the same as module
+          const { esnext, module } = publishManifest.exports[entryPoint]
+
+          if (
+            module &&
+            esnext &&
+            readFile(module) ==
+              readFile(esnext).replace(
+                /from '(.\[^'])\.esnext\.js';/g,
+                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
               )
-            }),
-          )
-          console.timeEnd('Bundled typescript declarations')
-        },
-      ].map((task) => task()),
-    )
+          ) {
+            await createFacade(esnext, module)
+          }
+        }
+
+        console.timeEnd('De-duplicated entry points based on content')
+      })(),
+      (async () => {
+        console.time('Generated typescript bundles')
+        await Promise.all(
+          entryPoints.map(({ outputFile, conditions }) => {
+            return generateTypesBundle(
+              conditions.default || conditions.browser || conditions.node,
+              path.resolve(paths.dist, `${outputFile}.d.ts`),
+            )
+          }),
+        )
+        console.timeEnd('Generated typescript bundles')
+      })(),
+    ])
+
+    publishManifest.dependencies = Object.keys(manifest.dependencies).length
+      ? manifest.dependencies
+      : undefined
+
+    await fs.writeFile(manifestPath, JSON.stringify(publishManifest, omitComments, 2))
   }
 
   async function generateTypesBundle(inputFile, dtsFile) {
@@ -1003,6 +1441,11 @@ async function main() {
     // => '.types/index.ts'
 
     const parts = inputFile.replace(/\.(ts|tsx)$/, '.d.ts').split(path.sep)
+
+    if (paths.relative) {
+      parts.unshift(...paths.relative.split(path.sep))
+    }
+
     let sourceDtsFile = path.resolve(typesDirectory, parts.join('/'))
 
     for (let offset = 0; offset < parts.length && !existsSync(sourceDtsFile); offset++) {
@@ -1020,14 +1463,12 @@ async function main() {
       sourcemap: true,
       freeze: false,
       esModule: false,
-      preferConst: true,
       exports: 'auto',
+      generatedCode: 'es2015'
     })
   }
 
   async function generateTypescriptDeclarations() {
-    console.time('Generated typescript declarations')
-
     const typesDirectory = path.resolve(paths.dist, '.types')
 
     const tsconfig = path.resolve(path.dirname(paths.tsconfig), 'tsconfig.dist.json')
@@ -1074,8 +1515,6 @@ async function main() {
     } finally {
       await fs.unlink(tsconfig)
     }
-
-    console.timeEnd('Generated typescript declarations')
 
     return typesDirectory
   }
@@ -1161,6 +1600,7 @@ export function searchForPackageRoot(current, root = current) {
   if (hasPackageJSON(current)) return current
 
   const dir = path.dirname(current)
+
   // reach the fs root
   if (!dir || dir === current) return root
 
@@ -1172,9 +1612,11 @@ export function searchForPackageRoot(current, root = current) {
  */
 function searchForWorkspaceRoot(current, root = searchForPackageRoot(current)) {
   if (hasRootFile(current)) return current
+
   if (hasWorkspacePackageJSON(current)) return current
 
   const dir = path.dirname(current)
+
   // reach the fs root
   if (!dir || dir === current) return root
 

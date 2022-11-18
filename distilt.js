@@ -275,7 +275,9 @@ async function main() {
           return minify(code, {
             // https://github.com/swc-project/swc/blob/main/crates/swc_ecma_minifier/src/option/terser.rs#L429
             ecma,
-            mangle: true,
+            mangle: {
+              toplevel: format !== 'iife',
+            },
             // https://swc.rs/docs/configuration/minification
             ...options.jsc.minify,
             compress: {
@@ -287,6 +289,7 @@ async function main() {
               typeofs: false,
               unsafe_symbols: mode === 'production',
               const_to_let: true,
+              toplevel: format !== 'iife',
               ...options.jsc.minify?.compress,
             },
             sourceMap: true,
@@ -344,6 +347,7 @@ async function main() {
                   typeofs: false,
                   unsafe_symbols: mode === 'production',
                   const_to_let: true,
+                  toplevel: format !== 'iife',
                 },
                 mangle: false,
               },

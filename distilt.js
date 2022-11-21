@@ -174,20 +174,20 @@ async function main() {
       name: 'swc',
       resolveId(source) {
         if (source === '@swc/helpers' || source.startsWith('@swc/helpers/')) {
-          if (manifest.dependencies['@swc/helpers']) {
-            // TODO: verify semver matches
-          } else {
-            manifest.dependencies['@swc/helpers'] = `^${
-              createRequire(import.meta.url)('@swc/helpers/package.json').version
-            }`
-          }
-
           if (format === 'iife') {
             return this.resolve(source, fileURLToPath(import.meta.url), { skipSelf: true }).then(
               (resolved) => {
                 return resolved && { ...resolved, external: false }
               },
             )
+          }
+
+          if (manifest.dependencies['@swc/helpers']) {
+            // TODO: verify semver matches
+          } else {
+            manifest.dependencies['@swc/helpers'] = `^${
+              createRequire(import.meta.url)('@swc/helpers/package.json').version
+            }`
           }
 
           if (format === 'cjs') {
@@ -1468,7 +1468,7 @@ async function main() {
       freeze: false,
       esModule: false,
       exports: 'auto',
-      generatedCode: 'es2015'
+      generatedCode: 'es2015',
     })
   }
 

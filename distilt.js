@@ -544,6 +544,11 @@ async function main() {
             ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
             : undefined,
 
+          // used by @svelkitjs/adapter-cloudflare
+          worker: targets.module
+            ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
+            : undefined,
+
           // used by some bundlers and jspm.dev
           browser:
             targets.browser && conditions.browser !== null
@@ -594,6 +599,7 @@ async function main() {
         main: publishManifest.exports['.'].node?.require || publishManifest.exports['.'].module,
         // Used by bundlers like rollup and CDNs
         module: publishManifest.exports['.'].module,
+        worker: publishManifest.exports['.'].worker,
         esnext: publishManifest.exports['.'].esnext,
         // Support common CDNs
         unpkg: publishManifest.exports['.'].script,
@@ -1287,6 +1293,11 @@ async function main() {
 
               // used by bundlers
               module: publishManifest.exports[entryPoint].module?.replace(
+                /\.([cm]?js)$/,
+                '.dev.$1',
+              ),
+
+              worker: publishManifest.exports[entryPoint].worker?.replace(
                 /\.([cm]?js)$/,
                 '.dev.$1',
               ),

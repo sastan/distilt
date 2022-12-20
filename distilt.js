@@ -139,6 +139,7 @@ async function main() {
     browser: manifest.publishConfig?.targets?.browser ?? 'es2019',
     worker: manifest.publishConfig?.targets?.worker ?? 'es2020',
     module: manifest.publishConfig?.targets?.module ?? 'es2020',
+    deno: manifest.publishConfig?.targets?.deno ?? 'es2022',
     esnext: manifest.publishConfig?.targets?.esnext ?? 'es2022',
   }
 
@@ -540,12 +541,19 @@ async function main() {
           esnext:
             targets.esnext && conditions.esnext !== null ? `${outputFile}.esnext.js` : undefined,
 
+          // used by deno
+          deno:
+            targets.deno && conditions.deno !== null
+              ? (conditions.deno || conditions.browser || conditions.default) &&
+                `${outputFile}.deno.js`
+              : undefined,
+
           // used by bundlers
           module: targets.module
             ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
             : undefined,
 
-          // used by deno, @svelkitjs/adapter-cloudflare, ...
+          // used by @svelkitjs/adapter-cloudflare, ...
           worker:
             targets.worker && conditions.worker !== null
               ? (conditions.worker || conditions.browser || conditions.default) &&
@@ -981,6 +989,140 @@ async function main() {
             console.timeEnd(`Generated Node.js esm wrappers [${mode}]`)
           },
           async () => {
+            if (!targets.deno) return
+
+            const inputs = entryPoints
+              .filter(({ conditions }) => conditions.deno !== null)
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.deno || conditions.browser || conditions.default,
+              ])
+              .filter(([_, source]) => source)
+
+            if (!inputs.length) return
+
+            console.time(`Generated deno bundles (${targets.deno}) [${mode}]`)
+
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (warning.code === 'CIRCULAR_DEPENDENCY') {
+                  return
+                }
+
+                if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
+                  throw new Error(warning.message)
+                }
+
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  browser: true,
+                  extensions: resolveExtensions,
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'deno',
+                    'worker',
+                    'browser',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'deno',
+                    'worker',
+                    'import',
+                    'require',
+                    'default',
+                    'browser',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({
+                  mode,
+                  format: 'es',
+                  jsc: {
+                    target: targets.deno, // https://swc.rs/docs/configuration/compilation#jsctransform
+                    transform: {
+                      // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                      optimizer: {
+                        globals: {
+                          // If you set { "window": "object" }, typeof window will be replaced with "object".
+                          typeofs: {
+                            window: 'undefined',
+                            document: 'undefined',
+                            process: 'undefined',
+                          },
+                        },
+                      },
+                    },
+
+                    // https://2ality.com/2015/12/babel6-loose-mode.html
+                    loose: true,
+                    keepClassNames: false,
+                  },
+                }),
+                replace({
+                  preventAssignment: true,
+                  values: {
+                    'process.browser': false,
+                    'process.env.NODE_ENV': JSON.stringify(mode),
+                  },
+                }),
+                dynamicImportVars({ warnOnError: true }),
+              ],
+            })
+
+            await bundle.write({
+              format: 'es',
+              dir: paths.dist,
+              entryFileNames: `[name].deno${suffix}.js`,
+              chunkFileNames: `_/[name]-[hash].js`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              compact: true,
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: false,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: true,
+              sourcemap: true,
+              freeze: false,
+              esModule: false,
+            })
+
+            await bundle.close()
+
+            console.timeEnd(`Generated worker deno (${targets.deno}) [${mode}]`)
+          },
+          async () => {
             if (!targets.worker) return
 
             const inputs = entryPoints
@@ -1077,7 +1219,7 @@ async function main() {
                 replace({
                   preventAssignment: true,
                   values: {
-                    'process.browser': true,
+                    'process.browser': false,
                     'process.env.NODE_ENV': JSON.stringify(mode),
                   },
                 }),
@@ -1421,6 +1563,8 @@ async function main() {
                 '.dev.$1',
               ),
 
+              deno: publishManifest.exports[entryPoint].deno?.replace(/\.([cm]?js)$/, '.dev.$1'),
+
               // used by bundlers
               module: publishManifest.exports[entryPoint].module?.replace(
                 /\.([cm]?js)$/,
@@ -1515,6 +1659,7 @@ async function main() {
           if (needsDevelopmentBuild) {
             const {
               esnext,
+              deno,
               module,
               worker,
               browser,
@@ -1522,13 +1667,38 @@ async function main() {
             } = publishManifest.exports[entryPoint]
             const {
               esnext: esnextDev,
+              deno: denoDev,
               module: moduleDev,
               worker: workerDev,
               browser: browserDev,
               node: { require: nodeDev } = {},
             } = publishManifest.exports[entryPoint].development
 
-            if (esnext && esnextDev && readFile(esnext) === readFile(esnextDev)) {
+            if (deno && denoDev && (await readFile(deno)) === (await readFile(denoDev))) {
+              await createFacade(denoDev, deno)
+            } else if (
+              moduleDev &&
+              denoDev &&
+              (await readFile(moduleDev)) ==
+                (await readFile(denoDev)).replace(
+                  /from '(.\[^'])\.deno\.dev\.js';/g,
+                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
+                )
+            ) {
+              await createFacade(workerDev, moduleDev)
+            } else if (
+              esnextDev &&
+              denoDev &&
+              (await readFile(esnextDev)) ==
+                (await readFile(denoDev)).replace(
+                  /from '(.\[^'])\.deno\.dev\.js';/g,
+                  `$1.esnext.dev.js`,
+                )
+            ) {
+              await createFacade(workerDev, esnextDev)
+            }
+
+            if (esnext && esnextDev && (await readFile(esnext)) === (await readFile(esnextDev))) {
               await createFacade(esnextDev, esnext)
             } else if (
               moduleDev &&
@@ -1584,7 +1754,7 @@ async function main() {
           }
 
           // esnext maybe the same as module, worker, or browser
-          const { esnext, module, worker, browser } = publishManifest.exports[entryPoint]
+          const { esnext, deno, module, worker, browser } = publishManifest.exports[entryPoint]
 
           if (
             module &&
@@ -1596,6 +1766,25 @@ async function main() {
               )
           ) {
             await createFacade(esnext, module)
+          }
+
+          if (
+            module &&
+            deno &&
+            (await readFile(module)) ==
+              (await readFile(deno)).replace(
+                /from '(.\[^'])\.deno\.js';/g,
+                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
+              )
+          ) {
+            await createFacade(deno, module)
+          } else if (
+            esnext &&
+            deno &&
+            (await readFile(esnext)) ==
+              (await readFile(deno)).replace(/from '(.\[^'])\.deno\.js';/g, `$1.esnext.js`)
+          ) {
+            await createFacade(deno, esnext)
           }
 
           if (

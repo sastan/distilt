@@ -550,7 +550,7 @@ async function main() {
             targets.worker && conditions.worker !== null
               ? (conditions.worker || conditions.browser || conditions.default) &&
                 `${outputFile}.worker.js`
-            : undefined,
+              : undefined,
 
           // used by some bundlers and jspm.dev
           browser:
@@ -602,13 +602,9 @@ async function main() {
         main: publishManifest.exports['.'].node?.require || publishManifest.exports['.'].module,
         // Used by bundlers like rollup and CDNs
         module: publishManifest.exports['.'].module,
-        worker: publishManifest.exports['.'].worker,
-        esnext: publishManifest.exports['.'].esnext,
         // Support common CDNs
         unpkg: publishManifest.exports['.'].script,
         jsdelivr: publishManifest.exports['.'].script,
-        // Used by bundlers and jspm.dev
-        browser: publishManifest.exports['.'].browser,
         // Typescript
         types: publishManifest.exports['.'].types,
       })

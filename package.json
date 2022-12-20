@@ -1,6 +1,6 @@
 {
   "name": "distilt",
-  "version": "0.19.0",
+  "version": "0.19.1",
   "description": "generate publishable bundles",
   "keywords": [
     "bundle",

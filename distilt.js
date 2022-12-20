@@ -1467,11 +1467,18 @@ async function main() {
           await generatedBundles('development')
         }
 
-        const readFile = (file) =>
-          readFileSync(path.resolve(paths.dist, file), 'utf8').replace(
-            /^\/\/# sourceMappingURL=\S+\.map$/m,
-            '',
-          )
+        const readFile = async (file) => {
+          // minify to remove all comments
+          const output = await minify(readFileSync(path.resolve(paths.dist, file), 'utf8'), {
+            // https://github.com/swc-project/swc/blob/main/crates/swc_ecma_minifier/src/option/terser.rs#L429
+            mangle: false,
+            compress: false,
+            format: { comments: false, ecma: 2022 },
+            sourceMap: false,
+          })
+
+          return output.code
+        }
 
         const createFacade = async (from, to, isCJS = false) => {
           const toFile = path.resolve(paths.dist, to)
@@ -1526,8 +1533,8 @@ async function main() {
             } else if (
               moduleDev &&
               esnextDev &&
-              readFile(moduleDev) ==
-                readFile(esnextDev).replace(
+              (await readFile(moduleDev)) ==
+                (await readFile(esnextDev)).replace(
                   /from '(.\[^'])\.esnext\.dev\.js';/g,
                   `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
                 )
@@ -1535,17 +1542,13 @@ async function main() {
               await createFacade(esnextDev, moduleDev)
             }
 
-            if (module && moduleDev && readFile(module) === readFile(moduleDev)) {
-              await createFacade(moduleDev, module)
-            }
-
-            if (worker && workerDev && readFile(worker) === readFile(workerDev)) {
+            if (worker && workerDev && (await readFile(worker)) === (await readFile(workerDev))) {
               await createFacade(workerDev, worker)
             } else if (
               moduleDev &&
               workerDev &&
-              readFile(moduleDev) ==
-                readFile(workerDev).replace(
+              (await readFile(moduleDev)) ==
+                (await readFile(workerDev)).replace(
                   /from '(.\[^'])\.worker\.dev\.js';/g,
                   `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
                 )
@@ -1553,13 +1556,17 @@ async function main() {
               await createFacade(workerDev, moduleDev)
             }
 
-            if (browser && browserDev && readFile(browser) === readFile(browserDev)) {
+            if (
+              browser &&
+              browserDev &&
+              (await readFile(browser)) === (await readFile(browserDev))
+            ) {
               await createFacade(browserDev, browser)
             } else if (
               moduleDev &&
               browserDev &&
-              readFile(moduleDev) ==
-                readFile(browserDev).replace(
+              (await readFile(moduleDev)) ==
+                (await readFile(browserDev)).replace(
                   /from '(.\[^'])\.browser\.dev\.js';/g,
                   `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
                 )
@@ -1567,7 +1574,11 @@ async function main() {
               await createFacade(browserDev, moduleDev)
             }
 
-            if (node && nodeDev && readFile(node) === readFile(nodeDev)) {
+            if (module && moduleDev && (await readFile(module)) === (await readFile(moduleDev))) {
+              await createFacade(moduleDev, module)
+            }
+
+            if (node && nodeDev && (await readFile(node)) === (await readFile(nodeDev))) {
               await createFacade(nodeDev, node, true)
             }
           }
@@ -1578,8 +1589,8 @@ async function main() {
           if (
             module &&
             esnext &&
-            readFile(module) ==
-              readFile(esnext).replace(
+            (await readFile(module)) ==
+              (await readFile(esnext)).replace(
                 /from '(.\[^'])\.esnext\.js';/g,
                 `$1${type === 'commonjs' ? '.esm' : ''}.js`,
               )
@@ -1590,8 +1601,8 @@ async function main() {
           if (
             module &&
             worker &&
-            readFile(module) ==
-              readFile(worker).replace(
+            (await readFile(module)) ==
+              (await readFile(worker)).replace(
                 /from '(.\[^'])\.worker\.js';/g,
                 `$1${type === 'commonjs' ? '.esm' : ''}.js`,
               )
@@ -1602,8 +1613,8 @@ async function main() {
           if (
             module &&
             browser &&
-            readFile(module) ==
-              readFile(browser).replace(
+            (await readFile(module)) ==
+              (await readFile(browser)).replace(
                 /from '(.\[^'])\.browser\.js';/g,
                 `$1${type === 'commonjs' ? '.esm' : ''}.js`,
               )

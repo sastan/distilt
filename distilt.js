@@ -1208,7 +1208,6 @@ async function main() {
                     loose: true,
                     keepClassNames: false,
                   },
-                  minify: true,
                 }),
                 replace({
                   preventAssignment: true,
@@ -1514,26 +1513,62 @@ async function main() {
             const {
               esnext,
               module,
+              worker,
               browser,
               node: { require: node } = {},
             } = publishManifest.exports[entryPoint]
             const {
               esnext: esnextDev,
               module: moduleDev,
+              worker: workerDev,
               browser: browserDev,
               node: { require: nodeDev } = {},
             } = publishManifest.exports[entryPoint].development
 
             if (esnext && esnextDev && readFile(esnext) === readFile(esnextDev)) {
               await createFacade(esnextDev, esnext)
+            } else if (
+              moduleDev &&
+              esnextDev &&
+              readFile(moduleDev) ==
+                readFile(esnextDev).replace(
+                  /from '(.\[^'])\.esnext\.dev\.js';/g,
+                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
+                )
+            ) {
+              await createFacade(esnextDev, moduleDev)
             }
 
             if (module && moduleDev && readFile(module) === readFile(moduleDev)) {
               await createFacade(moduleDev, module)
             }
 
+            if (worker && workerDev && readFile(worker) === readFile(workerDev)) {
+              await createFacade(workerDev, worker)
+            } else if (
+              moduleDev &&
+              workerDev &&
+              readFile(moduleDev) ==
+                readFile(workerDev).replace(
+                  /from '(.\[^'])\.worker\.dev\.js';/g,
+                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
+                )
+            ) {
+              await createFacade(workerDev, moduleDev)
+            }
+
             if (browser && browserDev && readFile(browser) === readFile(browserDev)) {
               await createFacade(browserDev, browser)
+            } else if (
+              moduleDev &&
+              browserDev &&
+              readFile(moduleDev) ==
+                readFile(browserDev).replace(
+                  /from '(.\[^'])\.browser\.dev\.js';/g,
+                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
+                )
+            ) {
+              await createFacade(browserDev, moduleDev)
             }
 
             if (node && nodeDev && readFile(node) === readFile(nodeDev)) {
@@ -1541,8 +1576,8 @@ async function main() {
             }
           }
 
-          // esnext maybe the same as module
-          const { esnext, module } = publishManifest.exports[entryPoint]
+          // esnext maybe the same as module, worker, or browser
+          const { esnext, module, worker, browser } = publishManifest.exports[entryPoint]
 
           if (
             module &&
@@ -1554,6 +1589,30 @@ async function main() {
               )
           ) {
             await createFacade(esnext, module)
+          }
+
+          if (
+            module &&
+            worker &&
+            readFile(module) ==
+              readFile(worker).replace(
+                /from '(.\[^'])\.worker\.js';/g,
+                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
+              )
+          ) {
+            await createFacade(worker, module)
+          }
+
+          if (
+            module &&
+            browser &&
+            readFile(module) ==
+              readFile(browser).replace(
+                /from '(.\[^'])\.browser\.js';/g,
+                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
+              )
+          ) {
+            await createFacade(browser, module)
           }
         }
 

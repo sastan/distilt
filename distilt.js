@@ -135,9 +135,9 @@ async function main() {
 
         return 'es2018' // >=10.0.0
       })(manifest.engines?.node)),
-    module: manifest.publishConfig?.targets?.module ?? 'es2021',
     script: manifest.publishConfig?.targets?.script ?? 'es2017',
     browser: manifest.publishConfig?.targets?.browser ?? 'es2019',
+    module: manifest.publishConfig?.targets?.module ?? 'es2020',
     esnext: manifest.publishConfig?.targets?.esnext ?? 'es2022',
   }
 

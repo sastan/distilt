@@ -1655,7 +1655,13 @@ async function main() {
 
         console.time('De-duplicated entry points based on content')
         // de-duplicate entryPoints
+        // deno -> module, worker, esnext
+        // worker -> module, browser, esnext
+        // browser -> module, esnext
+        // esnext -> module
+
         for (const { entryPoint } of entryPoints) {
+          // TODO: not pretty – refactor one day
           if (needsDevelopmentBuild) {
             const {
               esnext,
@@ -1665,6 +1671,7 @@ async function main() {
               browser,
               node: { require: node } = {},
             } = publishManifest.exports[entryPoint]
+
             const {
               esnext: esnextDev,
               deno: denoDev,
@@ -1679,37 +1686,27 @@ async function main() {
             } else if (
               moduleDev &&
               denoDev &&
-              (await readFile(moduleDev)) ==
-                (await readFile(denoDev)).replace(
-                  /from '(.\[^'])\.deno\.dev\.js';/g,
-                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
-                )
+              (await readFile(moduleDev)) == (await readFile(denoDev))
             ) {
-              await createFacade(workerDev, moduleDev)
+              await createFacade(denoDev, moduleDev)
             } else if (
               esnextDev &&
               denoDev &&
-              (await readFile(esnextDev)) ==
-                (await readFile(denoDev)).replace(
-                  /from '(.\[^'])\.deno\.dev\.js';/g,
-                  `$1.esnext.dev.js`,
-                )
+              (await readFile(esnextDev)) == (await readFile(denoDev))
             ) {
-              await createFacade(workerDev, esnextDev)
-            }
-
-            if (esnext && esnextDev && (await readFile(esnext)) === (await readFile(esnextDev))) {
-              await createFacade(esnextDev, esnext)
+              await createFacade(denoDev, esnextDev)
             } else if (
-              moduleDev &&
-              esnextDev &&
-              (await readFile(moduleDev)) ==
-                (await readFile(esnextDev)).replace(
-                  /from '(.\[^'])\.esnext\.dev\.js';/g,
-                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
-                )
+              workerDev &&
+              denoDev &&
+              (await readFile(workerDev)) == (await readFile(denoDev))
             ) {
-              await createFacade(esnextDev, moduleDev)
+              await createFacade(denoDev, workerDev)
+            } else if (
+              browserDev &&
+              denoDev &&
+              (await readFile(browserDev)) == (await readFile(denoDev))
+            ) {
+              await createFacade(denoDev, browserDev)
             }
 
             if (worker && workerDev && (await readFile(worker)) === (await readFile(workerDev))) {
@@ -1717,13 +1714,21 @@ async function main() {
             } else if (
               moduleDev &&
               workerDev &&
-              (await readFile(moduleDev)) ==
-                (await readFile(workerDev)).replace(
-                  /from '(.\[^'])\.worker\.dev\.js';/g,
-                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
-                )
+              (await readFile(moduleDev)) == (await readFile(workerDev))
             ) {
               await createFacade(workerDev, moduleDev)
+            } else if (
+              esnextDev &&
+              workerDev &&
+              (await readFile(esnextDev)) == (await readFile(workerDev))
+            ) {
+              await createFacade(workerDev, esnextDev)
+            } else if (
+              browserDev &&
+              workerDev &&
+              (await readFile(browserDev)) == (await readFile(workerDev))
+            ) {
+              await createFacade(workerDev, browserDev)
             }
 
             if (
@@ -1735,13 +1740,25 @@ async function main() {
             } else if (
               moduleDev &&
               browserDev &&
-              (await readFile(moduleDev)) ==
-                (await readFile(browserDev)).replace(
-                  /from '(.\[^'])\.browser\.dev\.js';/g,
-                  `$1${type === 'commonjs' ? '.esm' : ''}.dev.js`,
-                )
+              (await readFile(moduleDev)) == (await readFile(browserDev))
             ) {
               await createFacade(browserDev, moduleDev)
+            } else if (
+              esnextDev &&
+              browserDev &&
+              (await readFile(esnextDev)) == (await readFile(browserDev))
+            ) {
+              await createFacade(browserDev, esnextDev)
+            }
+
+            if (esnext && esnextDev && (await readFile(esnext)) === (await readFile(esnextDev))) {
+              await createFacade(esnextDev, esnext)
+            } else if (
+              moduleDev &&
+              esnextDev &&
+              (await readFile(moduleDev)) == (await readFile(esnextDev))
+            ) {
+              await createFacade(esnextDev, moduleDev)
             }
 
             if (module && moduleDev && (await readFile(module)) === (await readFile(moduleDev))) {
@@ -1753,62 +1770,32 @@ async function main() {
             }
           }
 
-          // esnext maybe the same as module, worker, or browser
           const { esnext, deno, module, worker, browser } = publishManifest.exports[entryPoint]
 
-          if (
-            module &&
-            esnext &&
-            (await readFile(module)) ==
-              (await readFile(esnext)).replace(
-                /from '(.\[^'])\.esnext\.js';/g,
-                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
-              )
-          ) {
-            await createFacade(esnext, module)
-          }
-
-          if (
-            module &&
-            deno &&
-            (await readFile(module)) ==
-              (await readFile(deno)).replace(
-                /from '(.\[^'])\.deno\.js';/g,
-                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
-              )
-          ) {
+          if (module && deno && (await readFile(module)) == (await readFile(deno))) {
             await createFacade(deno, module)
-          } else if (
-            esnext &&
-            deno &&
-            (await readFile(esnext)) ==
-              (await readFile(deno)).replace(/from '(.\[^'])\.deno\.js';/g, `$1.esnext.js`)
-          ) {
+          } else if (esnext && deno && (await readFile(esnext)) == (await readFile(deno))) {
             await createFacade(deno, esnext)
+          } else if (worker && deno && (await readFile(worker)) == (await readFile(deno))) {
+            await createFacade(deno, worker)
           }
 
-          if (
-            module &&
-            worker &&
-            (await readFile(module)) ==
-              (await readFile(worker)).replace(
-                /from '(.\[^'])\.worker\.js';/g,
-                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
-              )
-          ) {
+          if (module && worker && (await readFile(module)) == (await readFile(worker))) {
             await createFacade(worker, module)
+          } else if (esnext && worker && (await readFile(esnext)) == (await readFile(worker))) {
+            await createFacade(worker, esnext)
+          } else if (browser && worker && (await readFile(browser)) == (await readFile(worker))) {
+            await createFacade(worker, browser)
           }
 
-          if (
-            module &&
-            browser &&
-            (await readFile(module)) ==
-              (await readFile(browser)).replace(
-                /from '(.\[^'])\.browser\.js';/g,
-                `$1${type === 'commonjs' ? '.esm' : ''}.js`,
-              )
-          ) {
+          if (module && browser && (await readFile(module)) == (await readFile(browser))) {
             await createFacade(browser, module)
+          } else if (esnext && browser && (await readFile(esnext)) == (await readFile(browser))) {
+            await createFacade(browser, esnext)
+          }
+
+          if (module && esnext && (await readFile(module)) == (await readFile(esnext))) {
+            await createFacade(esnext, module)
           }
         }
 

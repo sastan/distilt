@@ -137,6 +137,7 @@ async function main() {
       })(manifest.engines?.node)),
     script: manifest.publishConfig?.targets?.script ?? 'es2017',
     browser: manifest.publishConfig?.targets?.browser ?? 'es2019',
+    worker: manifest.publishConfig?.targets?.worker ?? 'es2020',
     module: manifest.publishConfig?.targets?.module ?? 'es2020',
     esnext: manifest.publishConfig?.targets?.esnext ?? 'es2022',
   }
@@ -544,9 +545,11 @@ async function main() {
             ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
             : undefined,
 
-          // used by @svelkitjs/adapter-cloudflare
-          worker: targets.module
-            ? `${outputFile}${type === 'commonjs' ? '.esm' : ''}.js`
+          // used by deno, @svelkitjs/adapter-cloudflare, ...
+          worker:
+            targets.worker && conditions.worker !== null
+              ? (conditions.worker || conditions.browser || conditions.default) &&
+                `${outputFile}.worker.js`
             : undefined,
 
           // used by some bundlers and jspm.dev
@@ -980,6 +983,138 @@ async function main() {
             )
 
             console.timeEnd(`Generated Node.js esm wrappers [${mode}]`)
+          },
+          async () => {
+            if (!targets.worker) return
+
+            const inputs = entryPoints
+              .filter(({ conditions }) => conditions.worker !== null)
+              .map(({ outputFile, conditions }) => [
+                outputFile,
+                conditions.worker || conditions.browser || conditions.default,
+              ])
+              .filter(([_, source]) => source)
+
+            if (!inputs.length) return
+
+            console.time(`Generated worker bundles (${targets.worker}) [${mode}]`)
+
+            const bundle = await rollup({
+              input: Object.fromEntries(inputs),
+              external: (source) =>
+                external.includes(source) ||
+                external.some((external) => source.startsWith(external + '/')),
+              preserveEntrySignatures: 'strict',
+              treeshake: {
+                propertyReadSideEffects: false,
+              },
+              onwarn(warning, warn) {
+                if (warning.code === 'CIRCULAR_DEPENDENCY') {
+                  return
+                }
+
+                if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
+                  throw new Error(warning.message)
+                }
+
+                // Use default for everything else
+                warn(warning)
+              },
+              plugins: [
+                tsPaths({ tsConfigPath: paths.tsconfig }),
+                commonjs({
+                  extensions: ['.cjs', '.js'],
+                }),
+                nodeResolve({
+                  browser: true,
+                  extensions: resolveExtensions,
+                  mainFields: [
+                    'esnext',
+                    'esmodules',
+                    'modern',
+                    'es2015',
+                    'module',
+                    'worker',
+                    'browser',
+                    'jsnext:main',
+                    'main',
+                  ],
+                  exportConditions: [
+                    mode,
+                    'esnext',
+                    'modern',
+                    'esmodules',
+                    'es2015',
+                    'module',
+                    'worker',
+                    'import',
+                    'require',
+                    'default',
+                    'browser',
+                  ],
+                }),
+                json({ preferConst: true }),
+                swc({
+                  mode,
+                  format: 'es',
+                  jsc: {
+                    target: targets.worker, // https://swc.rs/docs/configuration/compilation#jsctransform
+                    transform: {
+                      // https://swc.rs/docs/configuration/compilation#jsctransformoptimizer
+                      optimizer: {
+                        globals: {
+                          // If you set { "window": "object" }, typeof window will be replaced with "object".
+                          typeofs: {
+                            window: 'undefined',
+                            document: 'undefined',
+                            process: 'undefined',
+                          },
+                        },
+                      },
+                    },
+
+                    // https://2ality.com/2015/12/babel6-loose-mode.html
+                    loose: true,
+                    keepClassNames: false,
+                  },
+                }),
+                replace({
+                  preventAssignment: true,
+                  values: {
+                    'process.browser': true,
+                    'process.env.NODE_ENV': JSON.stringify(mode),
+                  },
+                }),
+                dynamicImportVars({ warnOnError: true }),
+              ],
+            })
+
+            await bundle.write({
+              format: 'es',
+              dir: paths.dist,
+              entryFileNames: `[name].worker${suffix}.js`,
+              chunkFileNames: `_/[name]-[hash].js`,
+              assetFileNames: '_/assets/[name]-[hash][extname]',
+              compact: true,
+              generatedCode: {
+                preset: 'es2015',
+                arrowFunctions: true,
+                constBindings: true,
+                objectShorthand: true,
+                // prevent: [Symbol.toStringTag]: { value: 'Module' }
+                symbols: false,
+              },
+              hoistTransitiveImports: false,
+              interop: 'auto',
+              minifyInternalExports: true,
+              sourcemap: true,
+              freeze: false,
+              esModule: false,
+            })
+
+            await bundle.close()
+
+            console.timeEnd(`Generated worker bundles (${targets.worker}) [${mode}]`)
           },
           async () => {
             if (!targets.browser) return

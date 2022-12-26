@@ -1071,8 +1071,8 @@ async function main() {
                         globals: {
                           // If you set { "window": "object" }, typeof window will be replaced with "object".
                           typeofs: {
-                            window: 'undefined',
-                            document: 'undefined',
+                            // not replacing window and document because deno projects
+                            // often don't use a bundler and one dependency for server and browser
                             process: 'undefined',
                           },
                         },
@@ -1087,7 +1087,7 @@ async function main() {
                 replace({
                   preventAssignment: true,
                   values: {
-                    'process.browser': false,
+                    'process.browser': 'undefined',
                     'process.env.NODE_ENV': JSON.stringify(mode),
                   },
                 }),
@@ -1120,7 +1120,7 @@ async function main() {
 
             await bundle.close()
 
-            console.timeEnd(`Generated worker deno (${targets.deno}) [${mode}]`)
+            console.timeEnd(`Generated deno bundles (${targets.deno}) [${mode}]`)
           },
           async () => {
             if (!targets.worker) return
@@ -1847,6 +1847,18 @@ async function main() {
     const bundle = await rollup({
       input: path.relative(process.cwd(), sourceDtsFile),
       plugins: [dts()],
+      onwarn(warning, warn) {
+        if (warning.code === 'CIRCULAR_DEPENDENCY') {
+          return
+        }
+
+        if (warning.code === 'UNRESOLVED_IMPORT' && warning.source?.startsWith('node:')) {
+          throw new Error(warning.message)
+        }
+
+        // Use default for everything else
+        warn(warning)
+      },
     })
 
     await bundle.write({
